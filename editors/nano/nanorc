@@ -1,0 +1,10 @@
+# nano defaults (boosh). Syntax highlighting comes from the system /etc/nanorc,
+# which nano reads before this file.
+set linenumbers
+set mouse
+set softwrap
+set atblanks
+set autoindent
+set tabsize 4
+set tabstospaces
+set constantshow

@@ -1,0 +1,4 @@
+" Cursor shape: bar in insert, block in normal (works in vim.tiny, no +eval needed).
+" The ^[ below are real ESC bytes; the space before q is escaped on purpose.
+set t_SI=[6\ q
+set t_EI=[2\ q

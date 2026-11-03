@@ -1,0 +1,9 @@
+# pack: git. Safe defaults only; your name/email/aliases are never touched.
+[init]
+	defaultBranch = main
+[push]
+	autoSetupRemote = true
+[fetch]
+	prune = true
+[rerere]
+	enabled = true

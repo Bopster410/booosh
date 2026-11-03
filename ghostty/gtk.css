@@ -1,0 +1,13 @@
+/* thin headerbar: title + cwd subtitle, no fat padding */
+headerbar {
+  min-height: 0;
+  padding: 0 4px;
+  border-bottom: 1px solid rgba(128, 128, 128, 0.25);
+  box-shadow: none;
+}
+headerbar .title { font-size: 0.85em; font-weight: 500; }
+headerbar .subtitle { font-size: 0.75em; opacity: 0.55; }
+headerbar button { min-height: 20px; min-width: 20px; padding: 0 4px; margin: 2px 0; }
+/* thin tab bar */
+tabbar tabbox, tabbar .box { min-height: 24px; }
+window.csd { border-radius: 8px; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35); }

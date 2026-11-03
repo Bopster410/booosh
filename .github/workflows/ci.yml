@@ -1,0 +1,25 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    # macOS support is written from the docs and not verified locally yet: report it, do not block on it
+    continue-on-error: ${{ matrix.os == 'macos-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax check
+        run: |
+          for f in install.sh pack bootstrap.sh lib/menu.sh tests/smoke.sh; do bash -n "$f"; done
+      - name: Smoke tests
+        run: bash tests/smoke.sh
+      - name: Menu tests through a pty (Linux only)
+        if: runner.os == 'Linux'
+        run: BOOSH_TEST_PTY=1 bash tests/smoke.sh

@@ -1,0 +1,320 @@
+#!/usr/bin/env bash
+# Optional terminal setups ("packs") on top of the core install.
+# A pack only drops files into places the tools already read:
+#   fish   ~/.config/fish/conf.d/pack-<name>.fish
+#   git    ~/.config/git/pack-<name>[-<tool>].conf, pulled in by one include.path line
+# Removing a pack removes exactly those files again. Core config is never edited.
+#
+#   ./pack list                  what exists / what is installed
+#   ./pack show git              files, tools and abbreviations of a pack
+#   ./pack add git [docker ...]  install; asks before installing optional tools
+#   ./pack remove git            unlink the pack (installed tools are left alone)
+#   ./pack status                health check of installed packs
+# Options: --dry-run  --yes (accept git-setting conflicts)  --with-tools  --no-tools  --ask
+# Works with bash 3.2 (macOS system bash).
+set -euo pipefail
+
+SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PACKS="$SRC/packs"
+CFG="$HOME/.config"
+STATE="$CFG/boosh/packs"
+FISH_DIR="$CFG/fish/conf.d"
+GIT_DIR="$CFG/git"
+
+die() { echo "error: $*" >&2; exit 1; }
+
+# shellcheck source=lib/menu.sh
+. "$SRC/lib/menu.sh"
+
+usage() { sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; }
+
+DRY=0; YES=0; ASK=0; TOOLS=ask
+POS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dry-run)    DRY=1 ;;
+    --yes|-y)     YES=1 ;;
+    --ask)        ASK=1 ;;
+    --with-tools) TOOLS=yes ;;
+    --no-tools)   TOOLS=no ;;
+    -h|--help)    usage; exit 0 ;;
+    -*)           usage >&2; die "unknown option: $1" ;;
+    *)            POS+=("$1") ;;
+  esac
+  shift
+done
+[ ${#POS[@]} -gt 0 ] || { usage; exit 0; }
+CMD="${POS[0]}"
+NAMES=()
+if [ ${#POS[@]} -gt 1 ]; then NAMES=("${POS[@]:1}"); fi
+
+# ─── helpers ─────────────────────────────────────────────
+run() { if [ "$DRY" = 1 ]; then echo "would run: $*"; else "$@"; fi; }
+
+confirm() { # confirm "question" [y|n]   (non-interactive: the default)
+  local q="$1" def="${2:-n}" ans hint="y/N" pick
+  [ "$def" = y ] && hint="Y/n"
+  if menu_ok; then   # real terminal: arrow-key yes/no
+    select_menu pick "$q" "$([ "$def" = y ] && echo yes || echo no)" yes no
+    [ "$pick" = yes ]; return
+  fi
+  if [ "$ASK" != 1 ] && { [ ! -t 0 ] || [ ! -t 1 ]; }; then [ "$def" = y ]; return; fi
+  printf '%s [%s]: ' "$q" "$hint"
+  read -r ans || ans=""
+  ans="${ans:-$def}"
+  case "$ans" in y|Y|yes|YES) return 0 ;; *) return 1 ;; esac
+}
+
+backup() { # never overwrites an older backup
+  local dst="$1" b n=1
+  b="$dst.bak"
+  while [ -e "$b" ] || [ -L "$b" ]; do b="$dst.bak.$n"; n=$((n + 1)); done
+  if [ "$DRY" = 1 ]; then echo "would back up $dst -> $b"; else mv "$dst" "$b"; echo "backup  $dst -> $b"; fi
+}
+
+link() { # link SOURCE TARGET
+  local src="$1" dst="$2"
+  if [ -L "$dst" ] && [ "$(readlink "$dst")" = "$src" ]; then echo "ok      $dst"; return 0; fi
+  if [ -e "$dst" ] || [ -L "$dst" ]; then backup "$dst"; fi
+  if [ "$DRY" = 1 ]; then echo "would link $dst -> $src"; return 0; fi
+  mkdir -p "$(dirname "$dst")"
+  ln -s "$src" "$dst"; echo "link    $dst -> $src"
+}
+
+unlink_ours() { # unlink_ours TARGET PACKNAME : only removes symlinks that point into this pack
+  local dst="$1" name="$2"
+  [ -L "$dst" ] || { [ ! -e "$dst" ] || echo "skip    $dst is not a symlink, left alone"; return 0; }
+  case "$(readlink "$dst")" in
+    "$PACKS/$name/"*) if [ "$DRY" = 1 ]; then echo "would remove $dst"; else rm "$dst"; echo "removed $dst"; fi ;;
+    *) echo "skip    $dst points elsewhere, left alone" ;;
+  esac
+}
+
+valid_name() { case "$1" in ''|*[!a-z0-9_-]*) return 1 ;; esac; [ -f "$PACKS/$1/pack.conf" ]; }
+need_pack() { valid_name "$1" || die "no such pack: '$1' (see: ./pack list)"; }
+
+conf_get()   { sed -n "s/^$2=//p" "$PACKS/$1/pack.conf" | head -n 1; }
+conf_tools() { sed -n 's/^TOOL=//p' "$PACKS/$1/pack.conf"; }
+field()      { echo "$1" | cut -d'|' -f"$2"; }
+
+is_installed() { [ -f "$STATE" ] && grep -Fxq "$1" "$STATE"; }
+state_add() {
+  [ "$DRY" = 1 ] && return 0
+  mkdir -p "$(dirname "$STATE")"; is_installed "$1" || echo "$1" >> "$STATE"
+}
+state_del() {
+  [ "$DRY" = 1 ] && return 0
+  [ -f "$STATE" ] || return 0
+  grep -Fxv "$1" "$STATE" > "$STATE.tmp" || true
+  mv "$STATE.tmp" "$STATE"
+}
+
+have_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+brew_bin() {
+  local b
+  if have_cmd brew; then command -v brew; return 0; fi
+  for b in /home/linuxbrew/.linuxbrew/bin/brew /opt/homebrew/bin/brew /usr/local/bin/brew; do
+    [ -x "$b" ] && { echo "$b"; return 0; }
+  done
+  return 1
+}
+
+# ─── optional tools ──────────────────────────────────────
+ensure_tool() { # ensure_tool "cmd|brewpkg|aptpkg|description"
+  local spec="$1" cmd brewpkg aptpkg desc brew
+  cmd="$(field "$spec" 1)"; brewpkg="$(field "$spec" 2)"; aptpkg="$(field "$spec" 3)"; desc="$(field "$spec" 4)"
+  if have_cmd "$cmd"; then echo "have    $cmd (already installed)"; return 0; fi
+  case "$TOOLS" in
+    no)  echo "skip    $cmd ($desc)"; return 0 ;;
+    yes) ;;
+    ask) confirm "Install $cmd: $desc?" n || { echo "skip    $cmd"; return 0; } ;;
+  esac
+  if brew="$(brew_bin)" && [ -n "$brewpkg" ]; then
+    run "$brew" install "$brewpkg"
+  elif [ -n "$aptpkg" ] && have_cmd apt-get && apt-cache show "$aptpkg" >/dev/null 2>&1; then
+    if [ "$(id -u)" -eq 0 ]; then run apt-get install -y "$aptpkg"; else run sudo apt-get install -y "$aptpkg"; fi
+  else
+    echo "manual  no automatic install for $cmd on this machine (needs Homebrew, or an apt package); see the project page"
+    return 0
+  fi
+  if [ "$DRY" = 0 ] && ! have_cmd "$cmd"; then
+    echo "warn    $cmd was installed but is not on PATH (for Homebrew: add its 'brew shellenv' to your shell config)."
+    echo "        Config that needs $cmd will stay off until it is found; re-run './pack add' afterwards."
+  fi
+}
+
+# ─── git config include ──────────────────────────────────
+git_ok() { have_cmd git; }
+
+git_conflicts() { # print keys the user already set to a different value in the global git config
+  local file="$1" key val cur
+  while IFS='=' read -r key val; do
+    [ -n "$key" ] || continue
+    cur="$(git config --global --get "$key" 2>/dev/null || true)"
+    if [ -n "$cur" ] && [ "$cur" != "$val" ]; then echo "  $key: yours=$cur, pack=$val"; fi
+  done < <(git config -f "$file" --list)
+}
+
+git_include_has() { git config --global --get-all include.path 2>/dev/null | grep -Fxq "$1"; }
+
+git_attach() { # git_attach SOURCE_FILE LINK_NAME (without dir)
+  local src="$1" name="$2" dst="$GIT_DIR/$2" inc="~/.config/git/$2" c
+  c="$(git_conflicts "$src")"
+  if [ -n "$c" ]; then
+    echo "Your global git config already sets different values for:"
+    echo "$c"
+    echo "The include is appended last, so the pack's values would win."
+    if [ "$YES" = 1 ] || confirm "Continue and let the pack override these?" n; then :; else
+      echo "skip    $name (nothing changed for this file)"; return 0
+    fi
+  fi
+  link "$src" "$dst"
+  if git_include_has "$inc"; then echo "ok      include.path $inc"
+  else run git config --global --add include.path "$inc"; [ "$DRY" = 1 ] || echo "git     include.path $inc"; fi
+}
+
+git_detach() { # git_detach LINK_NAME PACKNAME
+  local name="$1" pack="$2" inc="~/.config/git/$1"
+  if git_ok && git_include_has "$inc"; then
+    run git config --global --fixed-value --unset-all include.path "$inc" \
+      || echo "warn    could not remove include.path $inc; remove that line from ~/.gitconfig by hand"
+    [ "$DRY" = 1 ] || echo "git     include.path $inc removed"
+  fi
+  unlink_ours "$GIT_DIR/$name" "$pack"
+}
+
+# ─── commands ────────────────────────────────────────────
+cmd_list() {
+  local d name st tools t cmd missing
+  for d in "$PACKS"/*/; do
+    [ -f "${d}pack.conf" ] || continue
+    name="$(basename "$d")"
+    if is_installed "$name"; then st="installed"; else st="available"; fi
+    printf '  %-8s %-10s %s\n' "$name" "$st" "$(conf_get "$name" DESCRIPTION)"
+    missing=""
+    while IFS= read -r t; do
+      [ -n "$t" ] || continue
+      cmd="$(field "$t" 1)"
+      have_cmd "$cmd" || missing="$missing $cmd"
+    done <<EOF
+$(conf_tools "$name")
+EOF
+    [ -z "$missing" ] || printf '  %-8s %-10s optional tools not installed:%s\n' "" "" "$missing"
+  done
+}
+
+cmd_show() {
+  local name="$1" t
+  need_pack "$name"
+  echo "$name: $(conf_get "$name" DESCRIPTION)"
+  echo "status: $(is_installed "$name" && echo installed || echo available)"
+  echo "files:"
+  [ ! -f "$PACKS/$name/fish.fish" ] || echo "  fish   $FISH_DIR/pack-$name.fish"
+  [ ! -f "$PACKS/$name/gitconfig" ] || echo "  git    $GIT_DIR/pack-$name.conf (+ include.path in ~/.gitconfig)"
+  for t in "$PACKS/$name"/gitconfig.*; do
+    [ -f "$t" ] || continue
+    echo "  git    $GIT_DIR/pack-$name-${t##*.}.conf (only while '${t##*.}' is installed)"
+  done
+  echo "optional tools (asked on add):"
+  conf_tools "$name" | while IFS= read -r t; do
+    [ -n "$t" ] || continue
+    printf '  %-12s %s [%s]\n' "$(field "$t" 1)" "$(field "$t" 4)" "$(have_cmd "$(field "$t" 1)" && echo installed || echo missing)"
+  done
+  if [ -f "$PACKS/$name/fish.fish" ]; then
+    echo "abbreviations:"
+    sed -n "s/^[[:space:]]*abbr -a \(--set-cursor \)\{0,1\}\([A-Za-z0-9_-]*\) \(.*\)$/  \2  =  \3/p" "$PACKS/$name/fish.fish" | sed "s/--set-cursor //; s/--function [A-Za-z0-9_]*/(computed when you press space)/"
+  fi
+  if [ -f "$PACKS/$name/gitconfig" ]; then
+    echo "git settings it adds:"
+    git_ok && git config -f "$PACKS/$name/gitconfig" --list | sed 's/^/  /' || echo "  (git not installed)"
+  fi
+}
+
+cmd_add() {
+  local name="$1" t cmd f suffix
+  need_pack "$name"
+  if is_installed "$name"; then echo "== $name (already installed, re-applying)"; else echo "== $name"; fi
+
+  # the tool list goes through fd 3 so that stdin stays free for the y/N questions
+  while IFS= read -r t <&3; do
+    [ -n "$t" ] || continue
+    ensure_tool "$t"
+  done 3<<EOF
+$(conf_tools "$name")
+EOF
+
+  [ ! -f "$PACKS/$name/fish.fish" ] || link "$PACKS/$name/fish.fish" "$FISH_DIR/pack-$name.fish"
+
+  if [ -f "$PACKS/$name/gitconfig" ]; then
+    if git_ok; then
+      git_attach "$PACKS/$name/gitconfig" "pack-$name.conf"
+      for f in "$PACKS/$name"/gitconfig.*; do
+        [ -f "$f" ] || continue
+        suffix="${f##*.}"
+        if have_cmd "$suffix"; then
+          git_attach "$f" "pack-$name-$suffix.conf"
+        else
+          # tool is gone or was never installed: make sure its config is not active
+          git_detach "pack-$name-$suffix.conf" "$name"
+        fi
+      done
+    else
+      echo "skip    git settings: git is not installed on this machine"
+    fi
+  fi
+
+  state_add "$name"
+  echo "done    $name. Open a new fish session (or: exec fish) to use it."
+}
+
+cmd_remove() {
+  local name="$1" f suffix
+  need_pack "$name"
+  echo "== remove $name"
+  [ ! -f "$PACKS/$name/fish.fish" ] || unlink_ours "$FISH_DIR/pack-$name.fish" "$name"
+  if [ -f "$PACKS/$name/gitconfig" ]; then
+    git_detach "pack-$name.conf" "$name"
+    for f in "$PACKS/$name"/gitconfig.*; do
+      [ -f "$f" ] || continue
+      git_detach "pack-$name-${f##*.}.conf" "$name"
+    done
+  fi
+  state_del "$name"
+  echo "done    $name removed. Tools it may have installed are still on your system."
+}
+
+cmd_status() {
+  local name f suffix bad=0 pbad inst=0
+  for name in $( [ -f "$STATE" ] && cat "$STATE" || true ); do
+    valid_name "$name" || { echo "WARN  $name: in state file but missing from the repo"; bad=1; continue; }
+    inst=1; pbad=0
+    if [ -f "$PACKS/$name/fish.fish" ] && [ ! -L "$FISH_DIR/pack-$name.fish" ]; then
+      echo "WARN  $name: $FISH_DIR/pack-$name.fish is missing (run: ./pack add $name)"; pbad=1
+    fi
+    if [ -f "$PACKS/$name/gitconfig" ] && git_ok; then
+      git_include_has "~/.config/git/pack-$name.conf" || { echo "WARN  $name: git include for pack-$name.conf is missing (run: ./pack add $name)"; pbad=1; }
+      for f in "$PACKS/$name"/gitconfig.*; do
+        [ -f "$f" ] || continue
+        suffix="${f##*.}"
+        if git_include_has "~/.config/git/pack-$name-$suffix.conf" && ! have_cmd "$suffix"; then
+          echo "WARN  $name: git is set to use '$suffix' but it is not on PATH, so git commands that page output will fail."
+          echo "      fix: install $suffix or put it on PATH, or run './pack add $name' (it switches that config off)"
+          pbad=1
+        fi
+      done
+    fi
+    if [ "$pbad" = 1 ]; then bad=1; else echo "ok    $name"; fi
+  done
+  [ "$inst" = 1 ] || echo "no packs installed (see: ./pack list)"
+  [ "$bad" = 0 ]
+}
+
+case "$CMD" in
+  list)   cmd_list ;;
+  status) cmd_status ;;
+  show)   [ ${#NAMES[@]} -gt 0 ] || die "usage: ./pack show NAME"; cmd_show "${NAMES[0]}" ;;
+  add)    [ ${#NAMES[@]} -gt 0 ] || die "usage: ./pack add NAME..."; for n in "${NAMES[@]}"; do cmd_add "$n"; done ;;
+  remove) [ ${#NAMES[@]} -gt 0 ] || die "usage: ./pack remove NAME..."; for n in "${NAMES[@]}"; do cmd_remove "$n"; done ;;
+  *) usage >&2; die "unknown command: $CMD" ;;
+esac

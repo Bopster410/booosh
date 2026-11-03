@@ -1,0 +1,13 @@
+# local state and leftovers
+*.bak
+*.bak.*
+.DS_Store
+*.swp
+*~
+
+# the generated cheatsheet lives in ~/.config/ghostty; docs/ keeps one example
+/cheatsheet.md
+
+# scratch files from manual testing
+.pack-*
+.tmp-*/
