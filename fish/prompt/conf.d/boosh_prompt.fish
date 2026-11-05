@@ -62,6 +62,7 @@ if status is-interactive
             and command kill $__boosh_git_pid 2>/dev/null
         end
         set -l worker (functions --details __boosh_git_worker)
+        test -f "$worker"; or return   # the file is gone (repository moved, branch switched): stay quiet, show no git info
         fish --no-config -c 'source $argv[1]; __boosh_git_worker $argv[2] $argv[3] $argv[4]' $worker $root $__boosh_git_out $fish_pid &
         set -g __boosh_git_pid $last_pid
         disown

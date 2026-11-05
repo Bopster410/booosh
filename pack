@@ -25,6 +25,8 @@ die() { echo "error: $*" >&2; exit 1; }
 
 # shellcheck source=lib/menu.sh
 . "$SRC/lib/menu.sh"
+# shellcheck source=lib/state.sh
+. "$SRC/lib/state.sh"
 
 usage() { sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; }
 
@@ -65,36 +67,47 @@ confirm() { # confirm "question" [y|n]   (non-interactive: the default)
   case "$ans" in y|Y|yes|YES) return 0 ;; *) return 1 ;; esac
 }
 
-backup() { # never overwrites an older backup
+backup() { # never overwrites an older backup; remembered in the manifest
   local dst="$1" b n=1
   b="$dst.bak"
   while [ -e "$b" ] || [ -L "$b" ]; do b="$dst.bak.$n"; n=$((n + 1)); done
-  if [ "$DRY" = 1 ]; then echo "would back up $dst -> $b"; else mv "$dst" "$b"; echo "backup  $dst -> $b"; fi
+  if [ "$DRY" = 1 ]; then echo "would back up $dst -> $b"; else mv "$dst" "$b"; echo "backup  $dst -> $b"; mf_add backup "$dst" "$b"; fi
 }
 
-link() { # link SOURCE TARGET
-  local src="$1" dst="$2"
-  if [ -L "$dst" ] && [ "$(readlink "$dst")" = "$src" ]; then echo "ok      $dst"; return 0; fi
-  if [ -e "$dst" ] || [ -L "$dst" ]; then backup "$dst"; fi
-  if [ "$DRY" = 1 ]; then echo "would link $dst -> $src"; return 0; fi
-  mkdir -p "$(dirname "$dst")"
-  ln -s "$src" "$dst"; echo "link    $dst -> $src"
+link() { # link TARGET LIVE : LIVE becomes a symlink to TARGET (a file inside the pack's snapshot)
+  local target="$1" live="$2" cur=""
+  if [ -L "$live" ] && [ "$(readlink "$live")" = "$target" ]; then
+    echo "ok      $live"; [ "$DRY" = 1 ] || mf_add link "$live" "$target" packs; return 0
+  fi
+  [ ! -L "$live" ] || cur="$(readlink "$live")"
+  case "$cur" in
+    "$PACKS"/*|"$BOOSH_HOME"/*)   # a link boosh made earlier (into the repository): replace it, nothing to back up
+      if [ "$DRY" = 1 ]; then echo "would relink $live -> $target"; return 0; fi
+      rm "$live" ;;
+  esac
+  if [ -e "$live" ] || [ -L "$live" ]; then backup "$live"; fi
+  if [ "$DRY" = 1 ]; then echo "would link $live -> $target"; return 0; fi
+  mkdir -p "$(dirname "$live")"
+  ln -s "$target" "$live"; echo "link    $live -> $target"; mf_add link "$live" "$target" packs
 }
 
-unlink_ours() { # unlink_ours TARGET PACKNAME : only removes symlinks that point into this pack
+unlink_ours() { # unlink_ours TARGET PACKNAME : only removes symlinks that point into this pack (its snapshot or the repository)
   local dst="$1" name="$2"
   [ -L "$dst" ] || { [ ! -e "$dst" ] || echo "skip    $dst is not a symlink, left alone"; return 0; }
   case "$(readlink "$dst")" in
-    "$PACKS/$name/"*) if [ "$DRY" = 1 ]; then echo "would remove $dst"; else rm "$dst"; echo "removed $dst"; fi ;;
+    "$BH_PACKS/$name/"*|"$PACKS/$name/"*) if [ "$DRY" = 1 ]; then echo "would remove $dst"; else rm "$dst"; echo "removed $dst"; fi ;;
     *) echo "skip    $dst points elsewhere, left alone" ;;
   esac
 }
 
-valid_name() { case "$1" in ''|*[!a-z0-9_-]*) return 1 ;; esac; [ -f "$PACKS/$1/pack.conf" ]; }
+# a pack is known if it is in this repository or already installed (its snapshot): so `remove` and `status` keep
+# working after a branch switch
+pdir() { if [ -f "$BH_PACKS/$1/pack.conf" ]; then echo "$BH_PACKS/$1"; else echo "$PACKS/$1"; fi; }
+valid_name() { case "$1" in ''|*[!a-z0-9_-]*) return 1 ;; esac; [ -f "$PACKS/$1/pack.conf" ] || [ -f "$BH_PACKS/$1/pack.conf" ]; }
 need_pack() { valid_name "$1" || die "no such pack: '$1' (see: ./pack list)"; }
 
-conf_get()   { sed -n "s/^$2=//p" "$PACKS/$1/pack.conf" | head -n 1; }
-conf_tools() { sed -n 's/^TOOL=//p' "$PACKS/$1/pack.conf"; }
+conf_get()   { sed -n "s/^$2=//p" "$(pdir "$1")/pack.conf" | head -n 1; }
+conf_tools() { sed -n 's/^TOOL=//p' "$(pdir "$1")/pack.conf"; }
 field()      { echo "$1" | cut -d'|' -f"$2"; }
 
 is_installed() { [ -f "$STATE" ] && grep -Fxq "$1" "$STATE"; }
@@ -205,14 +218,15 @@ EOF
 }
 
 cmd_show() {
-  local name="$1" t
+  local name="$1" t P_DIR
   need_pack "$name"
+  P_DIR="$(pdir "$name")"
   echo "$name: $(conf_get "$name" DESCRIPTION)"
   echo "status: $(is_installed "$name" && echo installed || echo available)"
   echo "files:"
-  [ ! -f "$PACKS/$name/fish.fish" ] || echo "  fish   $FISH_DIR/pack-$name.fish"
-  [ ! -f "$PACKS/$name/gitconfig" ] || echo "  git    $GIT_DIR/pack-$name.conf (+ include.path in ~/.gitconfig)"
-  for t in "$PACKS/$name"/gitconfig.*; do
+  [ ! -f "$P_DIR/fish.fish" ] || echo "  fish   $FISH_DIR/pack-$name.fish"
+  [ ! -f "$P_DIR/gitconfig" ] || echo "  git    $GIT_DIR/pack-$name.conf (+ include.path in ~/.gitconfig)"
+  for t in "$P_DIR"/gitconfig.*; do
     [ -f "$t" ] || continue
     echo "  git    $GIT_DIR/pack-$name-${t##*.}.conf (only while '${t##*.}' is installed)"
   done
@@ -221,19 +235,21 @@ cmd_show() {
     [ -n "$t" ] || continue
     printf '  %-12s %s [%s]\n' "$(field "$t" 1)" "$(field "$t" 4)" "$(have_cmd "$(field "$t" 1)" && echo installed || echo missing)"
   done
-  if [ -f "$PACKS/$name/fish.fish" ]; then
+  if [ -f "$P_DIR/fish.fish" ]; then
     echo "abbreviations:"
-    sed -n "s/^[[:space:]]*abbr -a \(--set-cursor \)\{0,1\}\([A-Za-z0-9_-]*\) \(.*\)$/  \2  =  \3/p" "$PACKS/$name/fish.fish" | sed "s/--set-cursor //; s/--function [A-Za-z0-9_]*/(computed when you press space)/"
+    sed -n "s/^[[:space:]]*abbr -a \(--set-cursor \)\{0,1\}\([A-Za-z0-9_-]*\) \(.*\)$/  \2  =  \3/p" "$P_DIR/fish.fish" | sed "s/--set-cursor //; s/--function [A-Za-z0-9_]*/(computed when you press space)/"
   fi
-  if [ -f "$PACKS/$name/gitconfig" ]; then
+  if [ -f "$P_DIR/gitconfig" ]; then
     echo "git settings it adds:"
-    git_ok && git config -f "$PACKS/$name/gitconfig" --list | sed 's/^/  /' || echo "  (git not installed)"
+    git_ok && git config -f "$P_DIR/gitconfig" --list | sed 's/^/  /' || echo "  (git not installed)"
   fi
 }
 
 cmd_add() {
-  local name="$1" t cmd f suffix
+  local name="$1" t cmd f suffix P_DIR
   need_pack "$name"
+  [ -f "$PACKS/$name/pack.conf" ] || die "pack '$name' is not in this repository (it is installed from another checkout); remove it with: ./pack remove $name"
+  MF_NEW=()
   if is_installed "$name"; then echo "== $name (already installed, re-applying)"; else echo "== $name"; fi
 
   # the tool list goes through fd 3 so that stdin stays free for the y/N questions
@@ -244,12 +260,18 @@ cmd_add() {
 $(conf_tools "$name")
 EOF
 
-  [ ! -f "$PACKS/$name/fish.fish" ] || link "$PACKS/$name/fish.fish" "$FISH_DIR/pack-$name.fish"
+  # the files the shell and git read live in a snapshot outside the repository, so a branch switch cannot break them
+  P_DIR="$PACKS/$name"
+  if [ "$DRY" = 0 ]; then
+    mkdir -p "$BH_PACKS"; rm -rf "$BH_PACKS/$name"; cp -R "$PACKS/$name" "$BH_PACKS/$name"; P_DIR="$BH_PACKS/$name"
+  fi
 
-  if [ -f "$PACKS/$name/gitconfig" ]; then
+  [ ! -f "$P_DIR/fish.fish" ] || link "$P_DIR/fish.fish" "$FISH_DIR/pack-$name.fish"
+
+  if [ -f "$P_DIR/gitconfig" ]; then
     if git_ok; then
-      git_attach "$PACKS/$name/gitconfig" "pack-$name.conf"
-      for f in "$PACKS/$name"/gitconfig.*; do
+      git_attach "$P_DIR/gitconfig" "pack-$name.conf"
+      for f in "$P_DIR"/gitconfig.*; do
         [ -f "$f" ] || continue
         suffix="${f##*.}"
         if have_cmd "$suffix"; then
@@ -265,36 +287,42 @@ EOF
   fi
 
   state_add "$name"
+  [ "$DRY" = 1 ] || mf_commit "pack:$name"
   echo "done    $name. Open a new fish session (or: exec fish) to use it."
 }
 
 cmd_remove() {
-  local name="$1" f suffix
+  local name="$1" f suffix P_DIR
   need_pack "$name"
+  P_DIR="$(pdir "$name")"
   echo "== remove $name"
-  [ ! -f "$PACKS/$name/fish.fish" ] || unlink_ours "$FISH_DIR/pack-$name.fish" "$name"
-  if [ -f "$PACKS/$name/gitconfig" ]; then
+  [ ! -f "$P_DIR/fish.fish" ] || unlink_ours "$FISH_DIR/pack-$name.fish" "$name"
+  if [ -f "$P_DIR/gitconfig" ]; then
     git_detach "pack-$name.conf" "$name"
-    for f in "$PACKS/$name"/gitconfig.*; do
+    for f in "$P_DIR"/gitconfig.*; do
       [ -f "$f" ] || continue
       git_detach "pack-$name-${f##*.}.conf" "$name"
     done
   fi
+  [ "$DRY" = 1 ] || { rm -rf "$BH_PACKS/$name"; mf_forget "pack:$name"; }
   state_del "$name"
   echo "done    $name removed. Tools it may have installed are still on your system."
 }
 
 cmd_status() {
-  local name f suffix bad=0 pbad inst=0
+  local name f suffix bad=0 pbad inst=0 P_DIR
   for name in $( [ -f "$STATE" ] && cat "$STATE" || true ); do
-    valid_name "$name" || { echo "WARN  $name: in state file but missing from the repo"; bad=1; continue; }
+    valid_name "$name" || { echo "WARN  $name: in the state file, but neither in the repository nor installed"; bad=1; continue; }
     inst=1; pbad=0
-    if [ -f "$PACKS/$name/fish.fish" ] && [ ! -L "$FISH_DIR/pack-$name.fish" ]; then
+    P_DIR="$(pdir "$name")"
+    if [ -f "$P_DIR/fish.fish" ] && [ ! -L "$FISH_DIR/pack-$name.fish" ]; then
       echo "WARN  $name: $FISH_DIR/pack-$name.fish is missing (run: ./pack add $name)"; pbad=1
+    elif [ -L "$FISH_DIR/pack-$name.fish" ] && [ ! -e "$FISH_DIR/pack-$name.fish" ]; then
+      echo "WARN  $name: $FISH_DIR/pack-$name.fish is a BROKEN link (run: ./pack add $name)"; pbad=1
     fi
-    if [ -f "$PACKS/$name/gitconfig" ] && git_ok; then
+    if [ -f "$P_DIR/gitconfig" ] && git_ok; then
       git_include_has "~/.config/git/pack-$name.conf" || { echo "WARN  $name: git include for pack-$name.conf is missing (run: ./pack add $name)"; pbad=1; }
-      for f in "$PACKS/$name"/gitconfig.*; do
+      for f in "$P_DIR"/gitconfig.*; do
         [ -f "$f" ] || continue
         suffix="${f##*.}"
         if git_include_has "~/.config/git/pack-$name-$suffix.conf" && ! have_cmd "$suffix"; then

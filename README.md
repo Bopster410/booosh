@@ -41,7 +41,9 @@ parameters), links an editor config, and keeps everything reversible: it validat
 - **Packs**: optional terminal setups on top of the base. Included: `git` and `docker`. Each pack only drops files into
   places the tools already read, and `./pack remove` takes them out again.
 - **Non-interactive**: every question has a flag, so it also works in scripts and on a new machine.
-- **Safe**: `--dry-run`, validation before writing, `.bak` backups, no silent overrides of your git settings.
+- **Safe**: a stable core outside the repository, validation before anything is applied, a snapshot (generation) per
+  install with `--rollback`, `--check`, `--uninstall`, your old config carried over, `.bak` backups, `--dry-run`, no silent
+  overrides of your git settings (see [Safe by design](#safe-by-design)).
 
 ## Quick start
 
@@ -180,26 +182,60 @@ boosh ships its own small prompt for fish (`fish/prompt/`, a few hundred lines w
   Tide or Pure is installed, boosh does not fight over `fish_prompt`: it tells you to remove that plugin first.
 - The technique (result delivered by a signal, then a repaint) is the one Hydro uses; the code is separate.
 
+## Safe by design
+
+What the shell and Ghostty read lives in a **stable core**, not in your checkout of this repository:
+
+```
+~/.local/share/booosh/
+├── core -> generations/0007-...     the current snapshot; everything installed points behind it
+├── generations/0006-..., 0007-...   one complete snapshot per install (the last 5 are kept)
+├── packs/git, packs/docker          snapshots of the installed packs
+└── manifest                         what boosh put where
+```
+
+- **The repository is only the source.** Switching branches, moving, renaming or deleting it cannot break an installed
+  setup (the tests install from a copy of the repository, delete the copy, and check that every link still resolves).
+- **Build, validate, then apply.** `install.sh` builds the whole snapshot in a staging folder, checks it (`ghostty
+  +validate-config` with your `local.conf` included, `fish --no-execute` for every prompt file) and only then makes it
+  current and touches your files. A mistake stops before anything on your machine has changed.
+- **Your files stay yours.** `~/.config/ghostty/local.conf` is created once and never overwritten; it is loaded last, so
+  anything in it wins. If you already have a Ghostty config, boosh keeps it as that `local.conf` (so your settings keep
+  applying on top of the boosh ones) and also leaves a `.bak` copy. `--import-config no` only backs it up.
+- **Everything is reversible.**
+
+| Command | What it does |
+|---|---|
+| `./install.sh --check` | health check: broken links, files you edited, repository ahead of what is installed (exit code 1 on problems) |
+| `./install.sh --generations` | list the generations (`*` = current) |
+| `./install.sh --rollback` | go back to the previous generation (config, prompt, style sheet) |
+| `./install.sh --uninstall` | remove what boosh installed and put your backed-up originals back; a `local.conf` you edited is kept |
+
+The data folder is `$XDG_DATA_HOME/booosh` (default `~/.local/share/booosh`); set `BOOSH_HOME` to move it and
+`BOOSH_KEEP_GENERATIONS` to keep more or fewer snapshots. Not covered yet: the editor files (`~/.vimrc`, `~/.nanorc`)
+still link into the repository; `--check` says so.
+
 ## What gets written where
 
 | Path | Written by | What |
 |---|---|---|
 | `~/.config/ghostty/config` | `install.sh` | **generated**; do not edit |
-| `~/.config/ghostty/local.conf` | `install.sh` (symlink) | per-OS overrides, loaded last (`command`, `macos-option-as-alt`) |
-| `~/.config/ghostty/gtk.css` | `install.sh` (symlink, Linux, `minimal`) | thin title bar styling |
+| `~/.config/ghostty/local.conf` | `install.sh` (once) | **yours**: created once, never overwritten, loaded last (your old config is carried over here) |
+| `~/.config/ghostty/gtk.css` | `install.sh` (link into the core, Linux, `minimal`) | thin title bar styling |
 | `~/.config/ghostty/cheatsheet.md` | `install.sh` | your cheatsheet |
 | `~/.config/ghostty/.install-choices` | `install.sh` | last answers (the next run's defaults) |
 | `~/.config/fish/conf.d/00-boosh-core.fish` | `install.sh` | `set -gx EDITOR ...` |
-| `~/.config/fish/functions/` (`fish_prompt`, `boosh-prompt`, helpers), `conf.d/boosh_prompt.fish`, `completions/boosh-prompt.fish` | `install.sh` (symlinks) | the boosh prompt |
+| `~/.config/fish/functions/` (`fish_prompt`, `boosh-prompt`, helpers), `conf.d/boosh_prompt.fish`, `completions/boosh-prompt.fish` | `install.sh` (links into the core) | the boosh prompt |
 | `~/.vimrc` or `~/.nanorc` | `install.sh` (symlink) | editor config |
-| `~/.config/fish/conf.d/pack-<name>.fish` | `pack` (symlink) | abbreviations |
+| `~/.config/fish/conf.d/pack-<name>.fish` | `pack` (link into the pack's snapshot) | abbreviations |
 | `~/.config/git/pack-<name>*.conf` + `include.path` in `~/.gitconfig` | `pack` | git settings |
 | `~/.config/boosh/packs` | `pack` | list of installed packs (per machine) |
+| `~/.local/share/booosh/` | `install.sh`, `pack` | the stable core, generations, pack snapshots and the manifest (see above) |
 
 Anything that already exists is moved to `<name>.bak` (or `.bak.1`, ...) before being replaced. `~/.bashrc`,
 `~/.profile` and your git identity are never touched.
 
-Per-machine tweaks belong in `~/.config/ghostty/local.conf`; the generated `config` is rewritten on every run.
+Per-machine tweaks belong in `~/.config/ghostty/local.conf` (yours); the generated `config` is rewritten on every run.
 
 ## Extending
 
@@ -234,7 +270,8 @@ BOOSH_TEST_PTY=1 bash tests/smoke.sh      # also drives the arrow-key menu throu
 
 The suite covers the installer flags and validation, idempotence, `--dry-run`, the cheatsheet, and the whole pack
 lifecycle (including conflicts and the `delta` safeguard), the prompt install and the prompt's git parser (dirty, detached
-HEAD, merge conflict, not a repo), formatting, command time and, with the pty flag, the asynchronous repaint in a live fish. It does not need `ghostty` or `fish`; checks that need them
+HEAD, merge conflict, not a repo), the stable core (generations, rollback, importing an old config, uninstall, `--check`, and
+that everything keeps working after the repository is deleted), formatting, command time and, with the pty flag, the asynchronous repaint in a live fish. It does not need `ghostty` or `fish`; checks that need them
 are skipped.
 
 ## License
