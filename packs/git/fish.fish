@@ -19,7 +19,7 @@ if status is-interactive
         abbr -a lg lazygit
     end
 
-    # git info in the default fish prompt (fish_git_prompt ships with fish)
+    # git info for fish's OWN prompt (fish_git_prompt ships with fish). The boosh prompt does not use these.
     set -g __fish_git_prompt_showdirtystate yes
     set -g __fish_git_prompt_showuntrackedfiles yes
     set -g __fish_git_prompt_showupstream auto

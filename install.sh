@@ -6,6 +6,7 @@
 #   ./install.sh --yes           no questions: last saved choices, else defaults
 #   ./install.sh --preset borderless --theme nord --font-size 15
 #   ./install.sh --editor nano   pick the default editor (config is linked, EDITOR set in fish)
+#   ./install.sh --only prompt   install just one part (ghostty, editor or prompt)
 #   ./install.sh --list          show presets / themes / defaults
 #   ./install.sh --cheatsheet    print the keybind cheatsheet for the chosen setup
 #                                (a copy is also written to ~/.config/ghostty/cheatsheet.md)
@@ -22,10 +23,11 @@ case "$(uname -s)" in
 esac
 
 PRESETS="minimal classic borderless"
+PROMPTS="boosh default"
 KEYSETS="alt default"
 THEMES="auto mocha rose-pine kanagawa tokyonight gruvbox nord custom"
 CURSORS="block bar underline block_hollow"
-VARS="PRESET KEYS MOD THEME FONT FONT_SIZE LIGATURES CURSOR BLINK OPACITY EDITOR_NAME"
+VARS="PRESET KEYS MOD THEME FONT FONT_SIZE LIGATURES CURSOR BLINK OPACITY PROMPT EDITOR_NAME"
 
 # editors/<name>/editor.conf makes <name> selectable; "none" installs no editor config
 EDITORS=""
@@ -63,6 +65,8 @@ menu_desc() { # menu_desc VAR OPTION
     BLINK:no)          echo "the cursor stays steady" ;;
     LIGATURES:yes)     echo "pairs like != -> => become one joined shape (the font must support it)" ;;
     LIGATURES:no)      echo "every character is drawn separately" ;;
+    PROMPT:boosh)      echo "two lines, git status computed in the background, no plugin" ;;
+    PROMPT:default)    echo "fish's own prompt, nothing is installed" ;;
     EDITOR_NAME:none)  echo "do not install an editor config" ;;
     EDITOR_NAME:*)     [ -f "$SRC/editors/$2/editor.conf" ] && editor_get "$2" DESCRIPTION || true ;;
   esac
@@ -337,15 +341,33 @@ opacity_preview() { # opacity_preview VAR VALUE -> 3 lines: wallpaper next to th
   done
 }
 
+# ─── prompt preview: a static sample ─────────────────────
+prompt_preview() { # prompt_preview OPTION -> 3 lines
+  local R=$'\033[0m' D=$'\033[2m'
+  local up="⇡" sym="❯" box="►"
+  _menu_utf8 || { up="^"; sym=">"; box=">"; }
+  case "$1" in
+    boosh)
+      printf '  \033[1;34m~/app\033[0m \033[32mmain\033[0m \033[36m%s1\033[0m \033[32m+2\033[0m \033[33m!1\033[0m \033[34m?3\033[0m \033[33m5s\033[0m\n' "$up"
+      printf '  \033[35m%s\033[0m\n' "$sym"
+      printf '  %sgit info appears a moment after the prompt; its look is one function%s\n' "$D" "$R" ;;
+    *)
+      printf '  \033[1;34m~/app\033[0m \033[32m(main)\033[0m%s\n' "$box"
+      printf '\n'
+      printf '  %sfish own prompt: one line, git is checked before every prompt%s\n' "$D" "$R" ;;
+  esac
+}
+
 menu_preview_lines() {
   case "$1" in
-    THEME) echo 6 ;; FONT_PICK|LIGATURES|CURSOR|BLINK) echo 3 ;; KEYS) echo 7 ;; *) echo 0 ;;
+    THEME) echo 6 ;; FONT_PICK|LIGATURES|CURSOR|BLINK|PROMPT) echo 3 ;; KEYS) echo 7 ;; *) echo 0 ;;
   esac
 }
 menu_preview() {
   case "$1" in
     THEME) theme_preview "$2" ;;       FONT_PICK) font_preview "$2" ;;   KEYS) keys_preview "$2" ;;
     LIGATURES) lig_preview "$2" ;;     CURSOR|BLINK) cursor_preview "$1" "$2" ;;
+    PROMPT) prompt_preview "$2" ;;
   esac
 }
 menu_preview_frame() { case "$1" in THEME) echo no ;; esac; }   # the theme preview has its own boxes
@@ -371,9 +393,13 @@ Parameters
   --cursor STYLE      block | bar | underline | block_hollow
   --blink | --no-blink            cursor blinking
   --opacity N         background opacity, 0..1
+Prompt
+  --prompt NAME       boosh | default  (boosh = two lines, git status computed in the background)
 Editor
   --editor NAME       vim | nano | none  (links its config, sets EDITOR in fish)
   --no-vim            same as --editor none (kept for old command lines)
+  --only STEPS        install only these parts, comma separated: ghostty, editor, prompt
+                      (for example "--only prompt" leaves your Ghostty config alone)
 Behaviour
   --yes, -y           never ask; use flags, else saved choices, else defaults
   --ask               force the menu even when stdin is not a terminal
@@ -392,12 +418,12 @@ dflt() {
     THEME) echo auto ;;       FONT) echo "JetBrains Mono" ;;
     FONT_SIZE) echo 13 ;;     LIGATURES) echo no ;;
     CURSOR) echo block ;;     BLINK) echo no ;;       OPACITY) echo 1.0 ;;
-    EDITOR_NAME) echo vim ;;
+    PROMPT) echo boosh ;;     EDITOR_NAME) echo vim ;;
   esac
 }
 
 for v in $VARS; do printf -v "$v" '%s' ''; done
-DRY=0; PRINT=0; ASK=0; YES=0; LIST=0; CHOSEN=0; CHEAT=0; NOCHEAT=0
+DRY=0; PRINT=0; ASK=0; YES=0; LIST=0; CHOSEN=0; CHEAT=0; NOCHEAT=0; ONLY=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -415,6 +441,8 @@ while [ $# -gt 0 ]; do
     --no-blink)     BLINK=no;      CHOSEN=1; shift ;;
     --yes|-y)  YES=1; shift ;;
     --ask)     ASK=1; shift ;;
+    --prompt)  PROMPT="${2:?--prompt needs a value}";       CHOSEN=1; shift 2 ;;
+    --only)    ONLY="${2:?--only needs a value}"; shift 2 ;;
     --editor)  EDITOR_NAME="${2:?--editor needs a value}"; CHOSEN=1; shift 2 ;;
     --no-vim)  EDITOR_NAME=none; CHOSEN=1; shift ;;
     --cheatsheet)    CHEAT=1; shift ;;
@@ -427,12 +455,24 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# --only: which parts to install (all when not given)
+want() { # want STEP
+  [ -n "$ONLY" ] || return 0
+  case ",$ONLY," in *",$1,"*) return 0 ;; esac
+  return 1
+}
+for _o in $(echo "$ONLY" | tr ',' ' '); do
+  case "$_o" in ghostty|editor|prompt) ;; *) die "--only: unknown part '$_o' (ghostty, editor, prompt)" ;; esac
+done
+
 if [ "$LIST" = 1 ]; then
   echo "appearance presets: $PRESETS"
   echo "keybind presets:    $KEYSETS"
   echo "themes:             $THEMES"
   echo "cursors:            $CURSORS"
   echo "editors:            $EDITORS"
+  echo "prompts:            $PROMPTS"
+  echo "install parts:      ghostty editor prompt (--only)"
   echo "defaults:"
   for v in $VARS; do printf '  %-10s %s\n' "$v" "$(dflt "$v")"; done
   exit 0
@@ -521,6 +561,7 @@ if [ "$INTERACTIVE" = 1 ]; then
   else
     echo "boosh installer: Enter keeps the default (*), number or name selects."
   fi
+  if want ghostty; then
   [ -n "$PRESET" ] || ask_choice PRESET "Appearance preset:" $PRESETS
   [ -n "$KEYS" ]   || ask_choice KEYS   "Keybind preset:" $KEYSETS
   if [ -z "$THEME" ]; then
@@ -568,7 +609,13 @@ if [ "$INTERACTIVE" = 1 ]; then
       fi
     fi
   fi
-  [ -n "$EDITOR_NAME" ] || ask_choice EDITOR_NAME "Default editor (its config is linked, EDITOR is set in fish):" $EDITORS
+  fi   # want ghostty
+  if want prompt; then
+    [ -n "$PROMPT" ] || ask_choice PROMPT "Shell prompt (fish):" $PROMPTS
+  fi
+  if want editor; then
+    [ -n "$EDITOR_NAME" ] || ask_choice EDITOR_NAME "Default editor (its config is linked, EDITOR is set in fish):" $EDITORS
+  fi
 fi
 
 for v in $VARS; do
@@ -584,6 +631,7 @@ re_ok()   { [[ "$1" =~ $2 ]]; }
 in_list "$PRESET" "$PRESETS" || die "preset '$PRESET' unknown; one of: $PRESETS"
 in_list "$KEYS" "$KEYSETS"   || die "keys '$KEYS' unknown; one of: $KEYSETS"
 in_list "$CURSOR" "$CURSORS" || die "cursor '$CURSOR' unknown; one of: $CURSORS"
+in_list "$PROMPT" "$PROMPTS" || die "prompt '$PROMPT' unknown; one of: $PROMPTS"
 in_list "$EDITOR_NAME" "$EDITORS" || die "editor '$EDITOR_NAME' unknown; one of: $EDITORS"
 re_ok "$MOD" '^(ctrl|alt|super)(\+(ctrl|alt|super))*$' \
   || die "--mod must be a combination of ctrl/alt/super, e.g. alt or ctrl+alt (got '$MOD')"
@@ -697,6 +745,7 @@ link() { # link SOURCE TARGET
   ln -s "$src" "$dst"; echo "link    $dst -> $src"
 }
 
+if want ghostty; then
 TMP="$(mktemp "${TMPDIR:-/tmp}/ghostty-config.XXXXXX")"
 trap 'rm -f "$TMP"' EXIT
 render > "$TMP"
@@ -744,6 +793,7 @@ if [ "$NOCHEAT" = 0 ]; then
     build_cheatsheet > "$GH/cheatsheet.md"; echo "wrote   $GH/cheatsheet.md"
   fi
 fi
+fi   # want ghostty
 
 # ─── editor: link its config, set EDITOR in fish ─────────
 install_editor() {
@@ -771,9 +821,41 @@ install_editor() {
   fi
   command -v "$cmd" >/dev/null 2>&1 || echo "note    $cmd is not installed on this machine"
 }
-install_editor
+if want editor; then install_editor; fi
+
+# ─── prompt: link the boosh prompt into fish (no plugin manager) ─
+install_prompt() {
+  local fdir="$HOME/.config/fish" sub f dst other=""
+  if [ "$PROMPT" = default ]; then   # take our links out again; fish falls back to its own prompt
+    for sub in functions conf.d completions; do
+      for f in "$SRC"/fish/prompt/$sub/*.fish; do
+        dst="$fdir/$sub/$(basename "$f")"
+        if [ -L "$dst" ] && [ "$(readlink "$dst")" = "$f" ]; then
+          if [ "$DRY" = 1 ]; then echo "would remove $dst"; else rm "$dst"; echo "removed $dst"; fi
+        fi
+      done
+    done
+    return 0
+  fi
+  # another prompt plugin already owns fish_prompt: do not fight it silently
+  [ ! -e "$fdir/conf.d/hydro.fish" ] || other="Hydro (remove it with: fisher remove jorgebucaran/hydro)"
+  [ ! -e "$fdir/conf.d/_tide_init.fish" ] || other="Tide (see: fisher list, then fisher remove <its name>)"
+  ls "$fdir"/functions/_pure_* >/dev/null 2>&1 && other="Pure (see: fisher list, then fisher remove <its name>)"
+  if [ -n "$other" ]; then
+    echo "skip    prompt: $other is installed. Remove it first, then run: ./install.sh --only prompt"
+    return 0
+  fi
+  for sub in functions conf.d completions; do
+    for f in "$SRC"/fish/prompt/$sub/*.fish; do link "$f" "$fdir/$sub/$(basename "$f")"; done
+  done
+}
+if want prompt; then install_prompt; fi
 
 echo
-echo "preset=$PRESET keys=$KEYS${KEYS:+ mod=$MOD} theme=$THEME font=\"$FONT\" $FONT_SIZE cursor=$CURSOR opacity=$OPACITY editor=$EDITOR_NAME"
-echo "done. Reload Ghostty: ctrl+shift+, (or restart). Re-run any time to change choices."
+if want ghostty; then
+  echo "preset=$PRESET keys=$KEYS${KEYS:+ mod=$MOD} theme=$THEME font=\"$FONT\" $FONT_SIZE cursor=$CURSOR opacity=$OPACITY prompt=$PROMPT editor=$EDITOR_NAME"
+  echo "done. Reload Ghostty: ctrl+shift+, (or restart). Re-run any time to change choices."
+else
+  echo "done ($ONLY). Open a new fish session (or run: exec fish) to see the changes."
+fi
 echo "Optional terminal setups for specific work (git, docker, ...): ./pack list"
