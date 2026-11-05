@@ -8,13 +8,17 @@
 #   ./pack list                  packs: installed ones and those of the catalog (downloaded when needed)
 #   ./pack show git              files, parts, tools and abbreviations (also for a source you have not installed yet)
 #   ./pack add git [docker ...]  install packs (a pack that is not shipped here is downloaded from the catalog)
-#   ./pack add git --tag         ... together with one of its optional parts (see ./pack show git)
+#   ./pack add git --tag --delta ... with some of its options: optional parts and optional tools alike (see ./pack show git)
+#                                    in a terminal, ./pack add git offers them in one checklist
 #   ./pack add OWNER/REPO[@REF]  install a fish plugin from GitHub, fisher style; also github:OWNER/REPO, https://...tar.gz, ./folder
 #   ./pack update [NAME ...]     download again and re-apply (every installed pack when no name is given)
-#   ./pack remove git [--tag]    unlink the pack (or only that part); installed tools are left alone
+#   ./pack remove git [--tag]    unlink the pack, or switch off one option; a program that pack itself installed is offered
+#                                    for uninstalling (--purge-tools: yes, --keep-tools: no), any other program is never touched
 #   ./pack status                health check of installed packs
-# Options: --dry-run  --yes (accept git-setting conflicts, and "install code from this source")  --with-tools  --no-tools
-#          --ask  --remote (when a packs/ folder sits next to this script, ignore it and use the catalog)
+# Flags: --dry-run  --yes (accept git-setting conflicts, and "install code from this source")  --all (every option)
+#        --none (no option, no question)  --with-tools / --no-tools (all / none of the tools)  --ask (also ask without a terminal)
+#        --purge-tools / --keep-tools (on remove: uninstall / keep the programs pack installed)
+#        --remote (when a packs/ folder sits next to this script, ignore it and use the catalog)
 # Works with bash 3.2 (macOS system bash).
 set -euo pipefail
 
@@ -37,17 +41,21 @@ PACK_API=1   # the pack format this tool understands (a pack may say API=N in pa
 
 usage() { sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//'; }
 
-DRY=0; YES=0; ASK=0; REMOTE=0; TOOLS=ask
+DRY=0; YES=0; ASK=0; REMOTE=0; OPT_ALL=0; OPT_NONE=0; OPT_TOOLS=; OPT_PURGE=0; OPT_KEEP=0
 POS=()
-EXTRAS=()   # --NAME that is not an option of this tool: an optional part of a pack (./pack add git --tag)
+EXTRAS=()   # --NAME that is not a flag of this tool: an option of a pack, a part or a tool (./pack add git --tag --delta)
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run)    DRY=1 ;;
     --yes|-y)     YES=1 ;;
     --ask)        ASK=1 ;;
     --remote)     REMOTE=1 ;;
-    --with-tools) TOOLS=yes ;;
-    --no-tools)   TOOLS=no ;;
+    --all)        OPT_ALL=1 ;;
+    --none)       OPT_NONE=1 ;;
+    --with-tools) OPT_TOOLS=all ;;
+    --no-tools)   OPT_TOOLS=none ;;
+    --purge-tools) OPT_PURGE=1 ;;
+    --keep-tools) OPT_KEEP=1 ;;
     -h|--help)    usage; exit 0 ;;
     --?*)         EXTRAS+=("${1#--}") ;;   # checked against the named packs below
     -*)           usage >&2; die "unknown option: $1" ;;
@@ -56,6 +64,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 [ ${#POS[@]} -gt 0 ] || { usage; exit 0; }
+[ "$OPT_PURGE$OPT_KEEP" != 11 ] || die "--purge-tools and --keep-tools contradict each other"
 CMD="${POS[0]}"
 NAMES=()
 if [ ${#POS[@]} -gt 1 ]; then NAMES=("${POS[@]:1}"); fi
@@ -130,18 +139,47 @@ valid_name() {
 }
 need_pack() { valid_name "$1" || die "no such pack: '$1' (see: ./pack list)"; }
 
-# optional parts ("extras") of a pack: packs/NAME/extras/PART/{extra.conf,functions/,completions/,fish.fish}
+# The options of a pack are of two kinds, and are chosen the same way (a flag, or one checklist):
+#   part  an optional folder of the pack: extras/NAME/{extra.conf,functions/,completions/,fish.fish}
+#   tool  an optional program: a TOOL=cmd|brew package|apt package|description line of pack.conf (the option is called cmd)
 extras_of()  { local d; for d in "$(pdir "$1")"/extras/*/; do if [ -f "${d}extra.conf" ]; then basename "$d"; fi; done; }
 is_extra()   { [ -f "$(pdir "$1")/extras/$2/extra.conf" ]; }
 extra_desc() { sed -n 's/^DESCRIPTION=//p' "$(pdir "$1")/extras/$2/extra.conf" | head -n 1; }
+tool_spec()  { # tool_spec PACK CMD -> its TOOL= line (without "TOOL=")
+  local t
+  while IFS= read -r t; do
+    [ -n "$t" ] || continue
+    if [ "$(field "$t" 1)" = "$2" ]; then echo "$t"; return 0; fi
+  done <<EOF
+$(conf_tools "$1")
+EOF
+  return 1
+}
+tools_of()   { local t; while IFS= read -r t; do if [ -n "$t" ]; then field "$t" 1; fi; done <<EOF
+$(conf_tools "$1")
+EOF
+}
+is_tool()    { tool_spec "$1" "$2" >/dev/null; }
+is_option()  { is_extra "$1" "$2" || is_tool "$1" "$2"; }
+options_of() { extras_of "$1"; tools_of "$1"; }
+opt_kind()   { if is_extra "$1" "$2"; then echo part; else echo tool; fi; }
+opt_desc()   { if is_extra "$1" "$2"; then extra_desc "$1" "$2"; else field "$(tool_spec "$1" "$2")" 4; fi; }
+opt_state()  { # installed (a part is linked, a tool is found on PATH), not installed, or off (a tool switched off for this pack)
+  if is_extra "$1" "$2"; then if is_installed "$1+$2"; then echo installed; else echo "not installed"; fi
+  elif is_installed "$1~$2"; then echo off
+  elif have_cmd "$2"; then echo installed
+  else echo "not installed"; fi
+}
 requested()  { local x; [ ${#EXTRAS[@]} -gt 0 ] || return 1; for x in "${EXTRAS[@]}"; do if [ "$x" = "$1" ]; then return 0; fi; done; return 1; }
-check_parts() { # check_parts PACK... : every --PART you gave must exist in every named pack
+CHOSEN=""   # the options this run sets up (decided by choose_options)
+chosen()     { case " $CHOSEN " in *" $1 "*) return 0 ;; esac; return 1; }
+check_parts() { # check_parts PACK... : every --OPTION you gave must exist in every named pack
   local n x
   [ ${#EXTRAS[@]} -gt 0 ] || return 0
   for n in "$@"; do
     need_pack "$n"
     for x in "${EXTRAS[@]}"; do
-      is_extra "$n" "$x" || die "'--$x' is not an option, and pack '$n' has no part '$x' (see: ./pack show $n)"
+      is_option "$n" "$x" || die "'--$x' is not a flag, and pack '$n' has no option '$x' (see: ./pack show $n)"
     done
   done
 }
@@ -165,37 +203,100 @@ state_del() {
 
 have_cmd() { command -v "$1" >/dev/null 2>&1; }
 
-brew_bin() {
+BREW_CANDIDATES="${BOOSH_BREW_CANDIDATES-/home/linuxbrew/.linuxbrew/bin/brew /opt/homebrew/bin/brew /usr/local/bin/brew}"
+brew_bin() { # Homebrew: on PATH, else at one of its usual places (it is often installed but not on PATH)
   local b
   if have_cmd brew; then command -v brew; return 0; fi
-  for b in /home/linuxbrew/.linuxbrew/bin/brew /opt/homebrew/bin/brew /usr/local/bin/brew; do
-    [ -x "$b" ] && { echo "$b"; return 0; }
+  for b in $BREW_CANDIDATES; do
+    if [ -x "$b" ]; then echo "$b"; return 0; fi
   done
   return 1
 }
 
 # ─── optional tools ──────────────────────────────────────
-ensure_tool() { # ensure_tool "cmd|brewpkg|aptpkg|description"
-  local spec="$1" cmd brewpkg aptpkg desc brew
+# The package manager is found, not configured: Homebrew first (when there is a brew package for the tool), else apt
+# (when apt has the package), else nothing and you are told why. The commands are built from the TOOL= line.
+pick_manager() { # pick_manager BREWPKG APTPKG : sets PM (brew|apt|empty), PM_BIN, PM_PKG and, when empty, PM_WHY
+  local brewpkg="$1" aptpkg="$2" brew
+  PM=""; PM_BIN=""; PM_PKG=""; PM_WHY=""
+  brew="$(brew_bin || true)"
+  if [ -n "$brew" ] && [ -n "$brewpkg" ]; then PM=brew; PM_BIN="$brew"; PM_PKG="$brewpkg"; return 0; fi
+  if [ -n "$aptpkg" ] && have_cmd apt-get && apt-cache show "$aptpkg" >/dev/null 2>&1; then PM=apt; PM_PKG="$aptpkg"; return 0; fi
+  if [ -z "$brew" ] && ! have_cmd apt-get; then
+    PM_WHY="no package manager found (pack knows Homebrew and apt). Install Homebrew (https://brew.sh) or the program itself"
+  elif [ -z "$brew" ] && [ -n "$brewpkg" ] && [ -z "$aptpkg" ]; then
+    PM_WHY="it is packaged only for Homebrew, and Homebrew is not installed (https://brew.sh)"
+  elif [ -z "$brew" ] && [ -n "$brewpkg" ]; then
+    PM_WHY="Homebrew is not installed (https://brew.sh), and apt has no package '$aptpkg'"
+  else
+    PM_WHY="no package for it in the package managers found here"
+  fi
+  return 1
+}
+
+tool_via() { # tool_via SPEC -> a short phrase: how this tool would be installed here
+  local spec="$1"
+  if pick_manager "$(field "$spec" 2)" "$(field "$spec" 3)"; then echo "via $PM"; else echo "not installable here: $PM_WHY"; fi
+}
+
+# Programs that pack itself installed (and so may offer to uninstall): pack<TAB>cmd<TAB>manager<TAB>package<TAB>brew path.
+# A program that was already on the machine is never in this log, so it is never touched.
+TOOLS_LOG="$CFG/boosh/tools"
+tool_log_get()  { [ -f "$TOOLS_LOG" ] || return 0; awk -F'\t' -v p="$1" -v c="$2" '$1 == p && $2 == c { print; exit }' "$TOOLS_LOG"; }
+tool_log_cmds() { [ -f "$TOOLS_LOG" ] || return 0; awk -F'\t' -v p="$1" '$1 == p { print $2 }' "$TOOLS_LOG"; }
+tool_log_drop() {
+  if [ "$DRY" = 1 ] || [ ! -f "$TOOLS_LOG" ]; then return 0; fi
+  awk -F'\t' -v p="$1" -v c="$2" '!($1 == p && $2 == c)' "$TOOLS_LOG" > "$TOOLS_LOG.tmp" && mv "$TOOLS_LOG.tmp" "$TOOLS_LOG"
+  return 0
+}
+tool_log_add() { # tool_log_add PACK CMD MANAGER PACKAGE BREWBIN
+  if [ "$DRY" = 1 ]; then return 0; fi
+  mkdir -p "$(dirname "$TOOLS_LOG")"
+  tool_log_drop "$1" "$2"
+  printf '%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "${5:-}" >> "$TOOLS_LOG"
+}
+tool_log_move() { # tool_log_move FROM_PACK CMD TO_PACK : another pack that uses the program takes over the right to remove it
+  local line mgr pkg bin
+  line="$(tool_log_get "$1" "$2")"
+  [ -n "$line" ] || return 0
+  IFS=$'\t' read -r _ _ mgr pkg bin <<EOF
+$line
+EOF
+  tool_log_drop "$1" "$2"
+  tool_log_add "$3" "$2" "$mgr" "$pkg" "$bin"
+}
+
+ensure_tool() { # ensure_tool "cmd|brewpkg|aptpkg|description" : install a tool that was chosen (and is missing)
+  local spec="$1" cmd brewpkg aptpkg desc
   cmd="$(field "$spec" 1)"; brewpkg="$(field "$spec" 2)"; aptpkg="$(field "$spec" 3)"; desc="$(field "$spec" 4)"
   if have_cmd "$cmd"; then echo "have    $cmd (already installed)"; return 0; fi
-  case "$TOOLS" in
-    no)  echo "skip    $cmd ($desc)"; return 0 ;;
-    yes) ;;
-    ask) confirm "Install $cmd: $desc?" n || { echo "skip    $cmd"; return 0; } ;;
-  esac
-  if brew="$(brew_bin)" && [ -n "$brewpkg" ]; then
-    run "$brew" install "$brewpkg"
-  elif [ -n "$aptpkg" ] && have_cmd apt-get && apt-cache show "$aptpkg" >/dev/null 2>&1; then
-    if [ "$(id -u)" -eq 0 ]; then run apt-get install -y "$aptpkg"; else run sudo apt-get install -y "$aptpkg"; fi
-  else
-    echo "manual  no automatic install for $cmd on this machine (needs Homebrew, or an apt package); see the project page"
+  if ! pick_manager "$brewpkg" "$aptpkg"; then
+    echo "warn    $cmd is not installed and cannot be: $PM_WHY."
+    echo "        Install it yourself ($desc), then run './pack add ${PK_NAME:-PACK}' again."
     return 0
   fi
+  case "$PM" in
+    brew)
+      echo "install $cmd via Homebrew ($PM_PKG)"
+      run "$PM_BIN" install "$PM_PKG" || { echo "warn    brew could not install $PM_PKG"; return 0; }
+      tool_log_add "${PK_NAME:-}" "$cmd" brew "$PM_PKG" "$PM_BIN" ;;
+    apt)
+      if [ "$(id -u)" -eq 0 ]; then
+        echo "install $cmd via apt ($PM_PKG)"; run apt-get install -y "$PM_PKG" || { echo "warn    apt could not install $PM_PKG"; return 0; }
+      elif have_cmd sudo; then
+        echo "install $cmd via apt ($PM_PKG), sudo will ask for your password"; run sudo apt-get install -y "$PM_PKG" || { echo "warn    apt could not install $PM_PKG"; return 0; }
+      else
+        echo "warn    $cmd needs apt, which needs root, and sudo is not installed: run  apt-get install $PM_PKG  as root"
+        return 0
+      fi
+      tool_log_add "${PK_NAME:-}" "$cmd" apt "$PM_PKG" "" ;;
+  esac
   if [ "$DRY" = 0 ] && ! have_cmd "$cmd"; then
-    echo "warn    $cmd was installed but is not on PATH (for Homebrew: add its 'brew shellenv' to your shell config)."
-    echo "        Config that needs $cmd will stay off until it is found; re-run './pack add' afterwards."
+    echo "warn    $cmd was installed but is not on PATH."
+    if [ "$PM" = brew ]; then echo "        Put Homebrew on PATH: in fish  fish_add_path $(dirname "$PM_BIN")  (for bash/zsh: eval \"\$($PM_BIN shellenv)\")"; fi
+    echo "        Config that needs $cmd stays off until it is found; run './pack add ${PK_NAME:-PACK}' again afterwards."
   fi
+  return 0
 }
 
 # ─── git config include ──────────────────────────────────
@@ -236,6 +337,115 @@ git_detach() { # git_detach LINK_NAME PACKNAME
     [ "$DRY" = 1 ] || echo "git     include.path $inc removed"
   fi
   unlink_ours "$GIT_DIR/$name" "$pack"
+}
+
+# ─── uninstalling what pack installed ───────────────────
+tool_present() { # tool_present CMD MANAGER PACKAGE BREWBIN : is the program still installed (Homebrew may keep it off PATH)?
+  if have_cmd "$1"; then return 0; fi
+  if [ "$2" = brew ] && [ -n "${4:-}" ] && [ -x "$4" ]; then [ -n "$("$4" list --versions "$3" 2>/dev/null)" ]; return; fi
+  return 1
+}
+
+tool_used_elsewhere() { # tool_used_elsewhere PACK CMD -> another installed pack that chose this tool (prints its name)
+  local other
+  if [ ! -f "$STATE" ]; then return 0; fi
+  while IFS= read -r other; do
+    case "$other" in ''|*+*|*~*) continue ;; esac
+    [ "$other" != "$1" ] || continue
+    if is_installed "$other+$2" && is_tool "$other" "$2"; then echo "$other"; return 0; fi
+  done < "$STATE"
+  return 0
+}
+
+remove_tools() { # remove_tools PACK [CMD ...] : offer to uninstall the programs this pack installed (all of them, or the named ones)
+  local pack="$1" cmds c line mgr pkg bin other yes
+  shift
+  if [ $# -gt 0 ]; then cmds="$*"; else cmds="$(tool_log_cmds "$pack")"; fi
+  for c in $cmds; do
+    line="$(tool_log_get "$pack" "$c")"
+    [ -n "$line" ] || continue   # not installed by this pack: never touched
+    IFS=$'\t' read -r _ _ mgr pkg bin <<EOF
+$line
+EOF
+    if ! tool_present "$c" "$mgr" "$pkg" "$bin"; then tool_log_drop "$pack" "$c"; continue; fi   # already gone
+    other="$(tool_used_elsewhere "$pack" "$c")"
+    if [ -n "$other" ]; then
+      echo "keep    $c: the pack '$other' uses it too (it can offer to remove it when you remove that pack)"
+      tool_log_move "$pack" "$c" "$other"
+      continue
+    fi
+    yes=0
+    if [ "$OPT_PURGE" = 1 ]; then yes=1
+    elif [ "$OPT_KEEP" = 1 ]; then yes=0
+    elif confirm "Also uninstall $c? Pack '$pack' installed it with $mgr ($pkg)." n; then yes=1; fi
+    if [ "$yes" = 0 ]; then
+      echo "keep    $c (to remove it later: $( [ "$mgr" = brew ] && echo "brew uninstall $pkg" || echo "sudo apt-get remove $pkg" )$( is_installed "$pack" && echo ", or ./pack remove $pack --purge-tools" ))"
+      continue
+    fi
+    case "$mgr" in
+      brew)
+        [ -x "$bin" ] || bin="$(brew_bin || true)"
+        if [ -z "$bin" ]; then echo "warn    Homebrew was not found: run  brew uninstall $pkg  yourself"; continue; fi
+        if run "$bin" uninstall "$pkg"; then tool_log_drop "$pack" "$c"; echo "removed $c (brew $pkg)"; else echo "warn    brew could not uninstall $pkg"; fi ;;
+      apt)
+        if [ "$(id -u)" -eq 0 ]; then
+          if run apt-get remove -y "$pkg"; then tool_log_drop "$pack" "$c"; echo "removed $c (apt $pkg)"; else echo "warn    apt could not remove $pkg"; fi
+        elif have_cmd sudo; then
+          echo "sudo will ask for your password to remove $pkg"
+          if run sudo apt-get remove -y "$pkg"; then tool_log_drop "$pack" "$c"; echo "removed $c (apt $pkg)"; else echo "warn    apt could not remove $pkg"; fi
+        else
+          echo "warn    removing $pkg needs root and sudo is not installed: run  apt-get remove $pkg  as root"
+        fi ;;
+    esac
+  done
+  return 0
+}
+
+# ─── choosing the options of a pack ─────────────────────
+MENU_PACK=""
+menu_desc() { # description in the checklist: what the option is, and for a tool how it would be installed
+  local o="$2" d
+  if is_extra "$MENU_PACK" "$o"; then extra_desc "$MENU_PACK" "$o"
+  else d="$(tool_spec "$MENU_PACK" "$o")"; echo "$(field "$d" 4)  [tool, $(tool_via "$d")]"; fi
+}
+
+choose_options() { # choose_options NAME : sets CHOSEN, the options to set up in this run
+  local name="$1" o todo="" typed any_flag=0
+  CHOSEN=""
+  # what was chosen before stays chosen (parts installed, tools asked for)
+  for o in $(options_of "$name"); do
+    if is_installed "$name+$o"; then CHOSEN="$CHOSEN $o"; fi
+  done
+  if [ ${#EXTRAS[@]} -gt 0 ]; then
+    any_flag=1
+    for o in "${EXTRAS[@]}"; do CHOSEN="$CHOSEN $o"; done
+  fi
+  if [ "$OPT_ALL" = 1 ]; then any_flag=1; for o in $(options_of "$name"); do CHOSEN="$CHOSEN $o"; done; fi
+  if [ "$OPT_TOOLS" = all ]; then any_flag=1; for o in $(tools_of "$name"); do CHOSEN="$CHOSEN $o"; done; fi
+  if [ "$OPT_NONE" = 1 ] || [ "$OPT_TOOLS" = none ]; then any_flag=1; fi
+  [ "$any_flag" = 0 ] || return 0
+  # nothing said: offer what is not on yet (a part not installed, a tool that is neither chosen nor already on this machine)
+  for o in $(options_of "$name"); do
+    if chosen "$o"; then continue; fi
+    if is_tool "$name" "$o" && have_cmd "$o"; then continue; fi
+    todo="$todo $o"
+  done
+  todo="${todo# }"
+  [ -n "$todo" ] || return 0
+  MENU_PACK="$name"
+  if menu_ok; then
+    select_multi typed "Optional for $name:" "" $todo
+    CHOSEN="$CHOSEN $typed"
+  elif [ "$ASK" = 1 ]; then
+    echo "Optional for $name: $todo"
+    printf 'Type the ones you want (space separated, all, or empty for none): '
+    read -r typed || typed=""
+    if [ "$typed" = all ]; then typed="$todo"; fi
+    for o in $typed; do
+      case " $todo " in *" $o "*) CHOSEN="$CHOSEN $o" ;; *) echo "skip    '$o' is not an option of $name" ;; esac
+    done
+  fi
+  return 0
 }
 
 # ─── fish files of a pack or of one of its parts (the layout fisher plugins use) ─────
@@ -310,7 +520,7 @@ preflight() { # preflight NAME SRCDIR
   local name="$1" d="$2" x paths p own bad=""
   paths="$( live_paths_of "$d" "pack-$name"
             for x in $(extras_of "$name"); do
-              if requested "$x" || is_installed "$name+$x"; then live_paths_of "$d/extras/$x" "pack-$name-$x"; fi
+              if chosen "$x"; then live_paths_of "$d/extras/$x" "pack-$name-$x"; fi
             done )"
   while IFS= read -r p; do
     [ -n "$p" ] || continue
@@ -401,13 +611,13 @@ write_meta() { # write_meta NAME : where an installed pack came from
 
 # ─── commands ────────────────────────────────────────────
 cmd_list() {
-  local d name st t cmd missing x names kind
+  local d name st x names kind
   catalog_load || echo "warn    the catalog is not available: only installed packs are listed"
   # every pack we know of: shipped here, in the catalog, installed
   names="$( {
       for d in "$PACKS"/*/; do if [ -f "${d}pack.conf" ]; then basename "$d"; fi; done
       if [ -n "$CATALOG_DIR" ]; then for d in "$CATALOG_DIR"/*/; do if [ -f "${d}pack.conf" ]; then basename "$d"; fi; done; fi
-      if [ -f "$STATE" ]; then grep -v '+' "$STATE" || true; fi
+      if [ -f "$STATE" ]; then grep -v '[+~]' "$STATE" || true; fi
     } | sort -u || true )"
   while IFS= read -r name; do
     [ -n "$name" ] || continue
@@ -415,17 +625,8 @@ cmd_list() {
     printf '  %-12s %-10s %s\n' "$name" "$st" "$(conf_get "$name" DESCRIPTION)"
     kind="$(meta_get "$name" kind)"
     if [ "$kind" = external ]; then printf '  %-12s %-10s from %s\n' "" "" "$(meta_get "$name" source)"; fi
-    missing=""
-    while IFS= read -r t; do
-      [ -n "$t" ] || continue
-      cmd="$(field "$t" 1)"
-      have_cmd "$cmd" || missing="$missing $cmd"
-    done <<EOF
-$(conf_tools "$name")
-EOF
-    [ -z "$missing" ] || printf '  %-12s %-10s optional tools not installed:%s\n' "" "" "$missing"
-    for x in $(extras_of "$name"); do
-      printf '  %-12s %-10s part --%s (%s): %s\n' "" "" "$x" "$(is_installed "$name+$x" && echo installed || echo "not installed")" "$(extra_desc "$name" "$x")"
+    for x in $(options_of "$name"); do
+      printf '  %-12s %-10s --%s (%s, %s): %s\n' "" "" "$x" "$(opt_kind "$name" "$x")" "$(opt_state "$name" "$x")" "$(opt_desc "$name" "$x")"
     done
   done <<EOF
 $names
@@ -436,7 +637,7 @@ EOF
 }
 
 cmd_show() {
-  local arg="$1" name t x P_DIR
+  local arg="$1" name x P_DIR
   if [ "$(src_kind "$arg")" = none ] && [ "$REMOTE" != 1 ] && valid_name "$arg"; then
     name="$arg"
   else
@@ -454,18 +655,15 @@ cmd_show() {
     [ -f "$t" ] || continue
     echo "  git    $GIT_DIR/pack-$name-${t##*.}.conf (only while '${t##*.}' is installed)"
   done
-  if [ -n "$(extras_of "$name")" ]; then
-    echo "optional parts (./pack add $name --PART; ./pack remove $name --PART):"
-    for x in $(extras_of "$name"); do
-      echo "  --$x [$(is_installed "$name+$x" && echo installed || echo "not installed")]  $(extra_desc "$name" "$x")"
-      list_fish_dir "$P_DIR/extras/$x" "pack-$name-$x" "      "
+  if [ -n "$(options_of "$name")" ]; then
+    echo "options (./pack add $name --OPTION, ./pack remove $name --OPTION; in a terminal ./pack add $name offers them in a checklist):"
+    for x in $(options_of "$name"); do
+      printf '  --%-10s %-5s [%s]  %s\n' "$x" "$(opt_kind "$name" "$x")" "$(opt_state "$name" "$x")" "$(opt_desc "$name" "$x")"
+      if is_extra "$name" "$x"; then list_fish_dir "$P_DIR/extras/$x" "pack-$name-$x" "        "
+      elif [ "$(opt_state "$name" "$x")" != installed ]; then printf '        %s\n' "$(tool_via "$(tool_spec "$name" "$x")")"
+      elif [ -n "$(tool_log_get "$name" "$x")" ]; then printf '        installed by pack: ./pack remove %s --purge-tools uninstalls it\n' "$name"; fi
     done
   fi
-  echo "optional tools (asked on add):"
-  conf_tools "$name" | while IFS= read -r t; do
-    [ -n "$t" ] || continue
-    printf '  %-12s %s [%s]\n' "$(field "$t" 1)" "$(field "$t" 4)" "$(have_cmd "$(field "$t" 1)" && echo installed || echo missing)"
-  done
   if [ -f "$P_DIR/fish.fish" ]; then
     echo "abbreviations:"
     sed -n "s/^[[:space:]]*abbr -a \(--set-cursor \)\{0,1\}\([A-Za-z0-9_-]*\) \(.*\)$/  \2  =  \3/p" "$P_DIR/fish.fish" | sed "s/--set-cursor //; s/--function [A-Za-z0-9_]*/(computed when you press space)/"
@@ -479,6 +677,7 @@ cmd_show() {
 
 cmd_add() {
   local arg="$1" name t cmd f x suffix P_SRC P_DIR api was_installed=0 prev_arg prev_kind
+  CHOSEN=""
   resolve_arg "$arg"
   name="$PK_NAME"; P_SRC="$PK_DIR"
 
@@ -489,7 +688,7 @@ cmd_add() {
   fi
   if [ ${#EXTRAS[@]} -gt 0 ]; then
     for x in "${EXTRAS[@]}"; do
-      is_extra "$name" "$x" || die "'--$x' is not an option, and pack '$name' has no part '$x' (see: ./pack show $arg)"
+      is_option "$name" "$x" || die "'--$x' is not a flag, and pack '$name' has no option '$x' (see: ./pack show $arg)"
     done
   fi
   if is_installed "$name"; then
@@ -502,15 +701,24 @@ cmd_add() {
     die "the name '$name' belongs to a pack of boosh; rename the folder or the repository of '$arg' to install it"
   fi
   if [ "$PK_KIND" = external ] && [ "$(meta_get "$name" arg)" != "$PK_ARG" ]; then trust_prompt "$name" "$P_SRC"; fi
+  choose_options "$name"
   preflight "$name" "$P_SRC"
 
   MF_NEW=()
   if [ "$was_installed" = 1 ]; then echo "== $name (already installed, re-applying)"; else echo "== $name"; fi
 
-  # the tool list goes through fd 3 so that stdin stays free for the y/N questions
+  # tools: the chosen ones are installed if missing, the rest are only mentioned (the list goes through fd 3 so stdin stays free)
   while IFS= read -r t <&3; do
     [ -n "$t" ] || continue
-    ensure_tool "$t"
+    cmd="$(field "$t" 1)"
+    if chosen "$cmd" && [ "$OPT_NONE" != 1 ] && [ "$OPT_TOOLS" != none ]; then
+      ensure_tool "$t"
+      state_add "$name+$cmd"; state_del "$name~$cmd"
+    elif have_cmd "$cmd"; then
+      echo "have    $cmd (already installed)"
+    else
+      echo "skip    $cmd: $(field "$t" 4) (add it with: ./pack add $name --$cmd)"
+    fi
   done 3<<EOF
 $(conf_tools "$name")
 EOF
@@ -526,7 +734,7 @@ EOF
   link_fish_dir "$P_DIR" "pack-$name"
   # optional parts: the ones you asked for now, plus the ones installed earlier (so a plain re-add does not lose them)
   for x in $(extras_of "$name"); do
-    if requested "$x" || is_installed "$name+$x"; then
+    if chosen "$x"; then
       echo "part    --$x: $(extra_desc "$name" "$x")"
       link_fish_dir "$P_DIR/extras/$x" "pack-$name-$x"
       state_add "$name+$x"
@@ -539,10 +747,10 @@ EOF
       for f in "$P_DIR"/gitconfig.*; do
         [ -f "$f" ] || continue
         suffix="${f##*.}"
-        if have_cmd "$suffix"; then
+        if have_cmd "$suffix" && ! is_installed "$name~$suffix"; then
           git_attach "$f" "pack-$name-$suffix.conf"
         else
-          # tool is gone or was never installed: make sure its config is not active
+          # the tool is gone, was never installed, or was switched off (./pack remove NAME --TOOL): its config must not be active
           git_detach "pack-$name-$suffix.conf" "$name"
         fi
       done
@@ -563,7 +771,7 @@ cmd_update() {
   if [ ${#NAMES[@]} -gt 0 ]; then names=("${NAMES[@]}")
   elif [ -f "$STATE" ]; then
     while IFS= read -r n; do
-      case "$n" in ''|*+*) continue ;; esac
+      case "$n" in ''|*+*|*~*) continue ;; esac
       names[${#names[@]}]="$n"
     done < "$STATE"
   fi
@@ -580,12 +788,21 @@ cmd_remove() {
   local name="$1" f x suffix P_DIR plugin
   need_pack "$name"
   P_DIR="$(pdir "$name")"
-  if [ ${#EXTRAS[@]} -gt 0 ]; then   # only the named parts
+  if [ ${#EXTRAS[@]} -gt 0 ]; then   # only the named options
     for x in "${EXTRAS[@]}"; do
       echo "== remove $name --$x"
-      unlink_fish_dir "$P_DIR/extras/$x" "pack-$name-$x" "$name"
-      state_del "$name+$x"
-      echo "done    --$x removed; the rest of $name stays."
+      if is_extra "$name" "$x"; then
+        unlink_fish_dir "$P_DIR/extras/$x" "pack-$name-$x" "$name"
+        state_del "$name+$x"
+        echo "done    --$x removed; the rest of $name stays."
+      else
+        # a tool: switch it off for this pack; the program is offered for uninstalling only if pack installed it
+        state_del "$name+$x"; state_add "$name~$x"
+        if [ -f "$P_DIR/gitconfig.$x" ]; then git_detach "pack-$name-$x.conf" "$name"; fi
+        echo "done    --$x is off for $name (its git settings are detached)."
+        remove_tools "$name" "$x"
+        if [ -z "$(tool_log_get "$name" "$x")" ] && have_cmd "$x"; then echo "note    the program $x stays on your machine (pack did not install it)."; fi
+      fi
     done
     return 0
   fi
@@ -593,10 +810,8 @@ cmd_remove() {
   plugin="$(meta_get "$name" plugin)"
   fish_event "${plugin:-$name}" uninstall "$P_DIR"
   unlink_fish_dir "$P_DIR" "pack-$name" "$name"
-  for x in $(extras_of "$name"); do
-    unlink_fish_dir "$P_DIR/extras/$x" "pack-$name-$x" "$name"
-    state_del "$name+$x"
-  done
+  for x in $(extras_of "$name"); do unlink_fish_dir "$P_DIR/extras/$x" "pack-$name-$x" "$name"; done
+  for x in $(options_of "$name"); do state_del "$name+$x"; state_del "$name~$x"; done
   if [ -f "$P_DIR/gitconfig" ]; then
     git_detach "pack-$name.conf" "$name"
     for f in "$P_DIR"/gitconfig.*; do
@@ -606,13 +821,14 @@ cmd_remove() {
   fi
   [ "$DRY" = 1 ] || { rm -rf "${BH_PACKS:?}/$name"; mf_forget "pack:$name"; }
   state_del "$name"
-  echo "done    $name removed. Tools it may have installed are still on your system."
+  remove_tools "$name"
+  echo "done    $name removed. Programs that were on your machine before are never touched."
 }
 
 cmd_status() {
   local name f x suffix bad=0 pbad inst=0 P_DIR
   for name in $( [ -f "$STATE" ] && cat "$STATE" || true ); do
-    case "$name" in *+*) continue ;; esac   # a part: checked together with its pack
+    case "$name" in *+*|*~*) continue ;; esac   # an option: checked together with its pack
     valid_name "$name" || { echo "WARN  $name: in the state file, but neither in the repository nor installed"; bad=1; continue; }
     inst=1; pbad=0
     P_DIR="$(pdir "$name")"

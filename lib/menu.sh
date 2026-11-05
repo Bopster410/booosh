@@ -1,6 +1,7 @@
 # Arrow-key menu in plain bash (3.2+, no dependencies). Source this file.
 #
 #   menu_ok                              true when stdin/stdout are a real terminal
+#   select_multi VAR "label" "PRE..." opt...   checklist: Space toggles, Enter confirms (see below)
 #   select_menu VAR "label" DEFAULT opt...
 #       Up/Down or k/j move, 1-9 jump, Enter (or Space) selects, Ctrl+C aborts.
 #       Sets VAR. DEFAULT is the preselected option (first option if it is not in the list).
@@ -166,6 +167,76 @@ select_menu() {
   printf '\033[?7h\033[?25h'
   printf '%s%s%s %s: %s\n' "$green" "$tick" "$_M_OFF" "${label%:}" "${_M_OPTS[$_M_CUR]}"
   printf -v "$var" '%s' "${_M_OPTS[$_M_CUR]}"
+}
+
+# ─── checklist ───────────────────────────────────────────
+#   select_multi VAR "label" "PRESELECTED..." opt...
+#       Up/Down or k/j move, Space toggles, a = all, n = none, Enter confirms, Ctrl+C aborts.
+#       Sets VAR to the chosen options, space separated (empty when none). PRESELECTED is a space separated list.
+#       If a function  menu_desc VAR OPTION  exists, its output is shown next to each option.
+
+_mm_draw() { # uses the _MM_* globals set by select_multi
+  local i box
+  for ((i = 0; i < _MM_N; i++)); do
+    if [ "${_MM_SEL[$i]}" = 1 ]; then box="[x]"; else box="[ ]"; fi
+    if [ "$i" -eq "$_MM_CUR" ]; then
+      printf '\033[2K  %s%s %s %-*s%s' "$_MM_ON" "$_MM_PTR" "$box" "$_MM_W" "${_MM_OPTS[$i]}" "$_MM_OFF"
+    else
+      printf '\033[2K    %s %-*s' "$box" "$_MM_W" "${_MM_OPTS[$i]}"
+    fi
+    if [ -n "${_MM_DESC[$i]}" ]; then printf '  %s%s%s' "$_MM_DIM" "${_MM_DESC[$i]}" "$_MM_OFF"; fi
+    printf '\n'
+  done
+}
+
+select_multi() {
+  local var="$1" label="$2" pre="$3"; shift 3
+  _MM_OPTS=("$@"); _MM_N=$#; _MM_CUR=0; _MM_W=0; _MM_SEL=(); _MM_DESC=()
+  local i key rest picked=""
+  for ((i = 0; i < _MM_N; i++)); do
+    if [ ${#_MM_OPTS[$i]} -gt "$_MM_W" ]; then _MM_W=${#_MM_OPTS[$i]}; fi
+    case " $pre " in *" ${_MM_OPTS[$i]} "*) _MM_SEL[$i]=1 ;; *) _MM_SEL[$i]=0 ;; esac
+    if type menu_desc >/dev/null 2>&1; then _MM_DESC[$i]="$(menu_desc "$var" "${_MM_OPTS[$i]}")"; else _MM_DESC[$i]=""; fi
+  done
+  if [ -z "${NO_COLOR:-}" ]; then
+    _MM_ON=$'\033[36;1m'; _MM_DIM=$'\033[2m'; _MM_OFF=$'\033[0m'; local bold=$'\033[1m' green=$'\033[32m'
+  else
+    _MM_ON=""; _MM_DIM=""; _MM_OFF=""; local bold="" green=""
+  fi
+  local tick="*"; _MM_PTR=">"
+  if _menu_utf8; then tick="✔"; _MM_PTR="❯"; fi
+
+  printf '\033[?7l'
+  printf '%s%s%s %s(↑/↓ move, Space toggle, a all, n none, Enter done)%s\n' "$bold" "$label" "$_MM_OFF" "$_MM_DIM" "$_MM_OFF"
+  printf '\033[?25l'
+  trap '_menu_abort' INT TERM
+  while :; do
+    _mm_draw
+    IFS= read -rsn1 key || key=""
+    case "$key" in
+      $'\033')
+        IFS= read -rsn2 -t 1 rest || rest=""
+        case "$rest" in
+          '[A'|'OA') _MM_CUR=$(( (_MM_CUR + _MM_N - 1) % _MM_N )) ;;
+          '[B'|'OB') _MM_CUR=$(( (_MM_CUR + 1) % _MM_N )) ;;
+        esac ;;
+      k) _MM_CUR=$(( (_MM_CUR + _MM_N - 1) % _MM_N )) ;;
+      j) _MM_CUR=$(( (_MM_CUR + 1) % _MM_N )) ;;
+      ' ') if [ "${_MM_SEL[$_MM_CUR]}" = 1 ]; then _MM_SEL[$_MM_CUR]=0; else _MM_SEL[$_MM_CUR]=1; fi ;;
+      a) for ((i = 0; i < _MM_N; i++)); do _MM_SEL[$i]=1; done ;;
+      n) for ((i = 0; i < _MM_N; i++)); do _MM_SEL[$i]=0; done ;;
+      '') break ;;
+    esac
+    printf '\033[%dA' "$_MM_N"
+  done
+  trap - INT TERM
+  printf '\033[%dA\033[J' $((_MM_N + 1))
+  printf '\033[?7h\033[?25h'
+  for ((i = 0; i < _MM_N; i++)); do
+    if [ "${_MM_SEL[$i]}" = 1 ]; then picked="${picked:+$picked }${_MM_OPTS[$i]}"; fi
+  done
+  printf '%s%s%s %s: %s\n' "$green" "$tick" "$_MM_OFF" "${label%:}" "${picked:-none}"
+  printf -v "$var" '%s' "$picked"
 }
 
 # ─── slider ──────────────────────────────────────────────

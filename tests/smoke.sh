@@ -18,6 +18,10 @@ has() { grep -qE -- "$2" <<< "$1"; }   # has "$text" "regex"
 # tested there), so nothing here needs the network
 FIXTURE_CATALOG="$ROOT/tests/fixtures/catalog"
 export BOOSH_CATALOG="$FIXTURE_CATALOG"
+export BOOSH_BREW_CANDIDATES=""   # never touch a real Homebrew
+# the tools the fixture pack knows must be absent unless a test puts one there: drop the PATH entries that hold a real one
+path_without() { local d c skip out="" IFS=:; for d in $PATH; do skip=0; for c in "$@"; do case "$d" in /usr/bin|/bin|/usr/local/bin) ;; *) [ -x "$d/$c" ] && skip=1 ;; esac; done; [ "$skip" = 1 ] || out="${out:+$out:}$d"; done; echo "$out"; }
+PATH="$(path_without delta lazygit lazydocker)"
 
 new_home() { T="$(mktemp -d "${TMPDIR:-/tmp}/boosh-test.XXXXXX")"; export HOME="$T" XDG_CONFIG_HOME="$T/.config" XDG_DATA_HOME="$T/.local/share"; unset GIT_CONFIG_GLOBAL; }
 cleanup() { [ -z "${T:-}" ] || rm -rf "$T" 2>/dev/null || { sleep 1; rm -rf "$T" 2>/dev/null; } || true; }
@@ -134,13 +138,13 @@ cleanup; new_home
 "$ROOT/pack" add git --tag --no-tools >/dev/null 2>&1
 check "--tag links the part's functions and completions" bash -c "[ -L '$HOME/.config/fish/functions/demo_tag.fish' ] && [ -L '$HOME/.config/fish/completions/demo_tag.fish' ]"
 out="$("$ROOT/pack" show git)"
-has "$out" "--tag \[installed\]" && has "$out" "functions/demo_tag.fish" && has "$out" "completions/demo_tag.fish" && pass "pack show lists the part, its functions and completions" || fail "pack show lists the part, its functions and completions" "$out"
-has "$("$ROOT/pack" list)" "part --tag \(installed\)" && pass "pack list shows the part as installed" || fail "pack list shows the part as installed"
+has "$out" "--tag +part +\[installed\]" && has "$out" "functions/demo_tag.fish" && has "$out" "completions/demo_tag.fish" && pass "pack show lists the part, its functions and completions" || fail "pack show lists the part, its functions and completions" "$out"
+has "$("$ROOT/pack" list)" "--tag \(part, installed\)" && pass "pack list shows the part as installed" || fail "pack list shows the part as installed"
 "$ROOT/pack" add git --no-tools >/dev/null 2>&1
 check "a plain re-add of the pack keeps the part" test -L "$HOME/.config/fish/functions/demo_tag.fish"
 out="$("$ROOT/pack" status 2>&1)"; has "$out" "ok +git" && ! has "$out" WARN && pass "pack status is clean with the part installed" || fail "pack status is clean with the part installed" "$out"
-out="$("$ROOT/pack" add git --bogus 2>&1)"; has "$out" "has no part" && pass "an unknown --part is rejected" || fail "an unknown --part is rejected" "$out"
-out="$("$ROOT/pack" add docker --tag 2>&1)"; has "$out" "docker.*has no part" && [ ! -e "$HOME/.config/fish/conf.d/pack-docker.fish" ] && pass "a part the pack does not have changes nothing" || fail "a part the pack does not have changes nothing" "$out"
+out="$("$ROOT/pack" add git --bogus 2>&1)"; has "$out" "has no option" && pass "an unknown --option is rejected" || fail "an unknown --option is rejected" "$out"
+out="$("$ROOT/pack" add docker --tag 2>&1)"; has "$out" "docker.*has no option" && [ ! -e "$HOME/.config/fish/conf.d/pack-docker.fish" ] && pass "an option the pack does not have changes nothing" || fail "an option the pack does not have changes nothing" "$out"
 "$ROOT/pack" remove git --tag >/dev/null 2>&1
 check "remove --tag unlinks the part and its completion" bash -c "[ ! -L '$HOME/.config/fish/functions/demo_tag.fish' ] && [ ! -L '$HOME/.config/fish/completions/demo_tag.fish' ]"
 check "...but the rest of the pack stays" bash -c "[ -L '$HOME/.config/fish/conf.d/pack-git.fish' ] && [ -L '$HOME/.config/fish/functions/demo_fn.fish' ]"
@@ -148,6 +152,175 @@ check "...but the rest of the pack stays" bash -c "[ -L '$HOME/.config/fish/conf
 check "a plain re-add does not bring a removed part back" test ! -e "$HOME/.config/fish/functions/demo_tag.fish"
 "$ROOT/pack" add git --tag --no-tools >/dev/null 2>&1; "$ROOT/pack" remove git >/dev/null 2>&1
 check "removing the whole pack removes its parts too" bash -c "[ ! -L '$HOME/.config/fish/functions/demo_tag.fish' ] && [ ! -L '$HOME/.config/fish/conf.d/pack-git.fish' ] && ! grep -q 'demo_tag' '$XDG_DATA_HOME/booosh/manifest' 2>/dev/null"
+
+echo "== options: parts and tools are chosen the same way (fake Homebrew / apt, nothing real is installed)"
+cleanup; new_home
+TB="$(mktemp -d "${TMPDIR:-/tmp}/boosh-bins.XXXXXX")"
+# a PATH with only the basics, so that a package manager is there only when a test puts a fake one in
+mkbin() { # mkbin DIR [brew] [apt]
+  local d="$1" c p
+  mkdir -p "$d"
+  for c in bash sh env sed grep cut cat mkdir ln rm cp mv find head tail sort uniq date readlink awk git mktemp basename dirname wc tr cksum tar id printf stty touch chmod ls tee; do
+    p="$(command -v "$c" 2>/dev/null)" && ln -sf "$p" "$d/$c"
+  done
+  shift
+  for c in "$@"; do
+    case "$c" in
+      brew) cat > "$d/brew" <<'FAKE'
+#!/bin/sh
+# fake brew: install / uninstall are logged and put / remove a stub program next to this script; "list --versions PKG" says if it is there
+d="$(dirname "$0")"; pkg="$2"; [ "$1" = list ] && pkg="$3"
+case "$pkg" in git-delta) c=delta ;; *) c="$pkg" ;; esac
+case "$1" in
+  install) echo "brew install $pkg" >> "$FAKE_LOG"; printf '#!/bin/sh\nexit 0\n' > "$d/$c"; chmod +x "$d/$c" ;;
+  uninstall) echo "brew uninstall $pkg" >> "$FAKE_LOG"; rm -f "$d/$c" ;;
+  list) [ -x "$d/$c" ] && echo "$pkg 1.0" ;;
+esac
+exit 0
+FAKE
+        chmod +x "$d/brew" ;;
+      apt) cat > "$d/apt-get" <<'FAKE'
+#!/bin/sh
+d="$(dirname "$0")"; pkg="$3"
+case "$pkg" in git-delta) c=delta ;; *) c="$pkg" ;; esac
+case "$1" in
+  install) echo "apt-get install $pkg" >> "$FAKE_LOG"; printf '#!/bin/sh\nexit 0\n' > "$d/$c"; chmod +x "$d/$c" ;;
+  remove) echo "apt-get remove $pkg" >> "$FAKE_LOG"; rm -f "$d/$c" ;;
+esac
+exit 0
+FAKE
+        cat > "$d/apt-cache" <<'FAKE'
+#!/bin/sh
+# "apt-cache show PKG" succeeds only for the packages listed in FAKE_APT_PKGS
+for p in $FAKE_APT_PKGS; do [ "$p" = "$2" ] && exit 0; done
+exit 100
+FAKE
+        printf '#!/bin/sh\nexec "$@"\n' > "$d/sudo"
+        chmod +x "$d/apt-get" "$d/apt-cache" "$d/sudo" ;;
+    esac
+  done
+}
+export FAKE_LOG="$T/fake.log" FAKE_APT_PKGS="git-delta"
+fakehome() { cleanup; new_home; : > "$T/fake.log"; export FAKE_LOG="$T/fake.log"; }
+BREWONLY="$TB/path-brew"; APTONLY="$TB/path-apt"; NOPM="$TB/path-none"; BOTH="$TB/path-both"
+mkbin "$BREWONLY" brew; mkbin "$APTONLY" apt; mkbin "$NOPM"; mkbin "$BOTH" brew apt
+fp() { env PATH="$1" BOOSH_CATALOG="$FIXTURE_CATALOG" "$ROOT/pack" "${@:2}" 2>&1; }   # fp PATH pack-args...
+
+# Homebrew is preferred when it is there and has the package
+cp -R "$BREWONLY" "$TB/b1"; : > "$T/fake.log"
+out="$(fp "$TB/b1" add git --delta)"
+has "$out" "install delta via Homebrew \(git-delta\)" && grep -q "brew install git-delta" "$T/fake.log" && pass "--delta installs the tool through Homebrew when it is available" || fail "--delta installs the tool through Homebrew when it is available" "$out"
+check "...and its git settings are switched on (delta is found now)" bash -c "PATH='$TB/b1' git config --get core.pager | grep -qx delta"
+check "...and the choice is remembered" grep -qx "git+delta" "$HOME/.config/boosh/packs"
+out="$(fp "$TB/b1" show git)"
+has "$out" "--delta +tool +\[installed\]" && has "$out" "--tag +part +\[not installed\]" && pass "pack show lists parts and tools in one block" || fail "pack show lists parts and tools in one block" "$out"
+out="$(fp "$TB/b1" list)"
+has "$out" "--lazygit \(tool, not installed\)" && has "$out" "--tag \(part, not installed\)" && pass "pack list shows them in one way too" || fail "pack list shows them in one way too" "$out"
+
+# apt is the fallback; sudo is announced
+fakehome; cp -R "$APTONLY" "$TB/a1"
+out="$(fp "$TB/a1" add git --delta)"
+has "$out" "install delta via apt \(git-delta\), sudo will ask" && grep -q "apt-get install git-delta" "$T/fake.log" && pass "without Homebrew the tool comes from apt (and sudo is announced)" || fail "without Homebrew the tool comes from apt" "$out"
+
+# a tool that exists in the other manager only: no silent mixing, a clear reason
+fakehome; cp -R "$APTONLY" "$TB/a2"
+out="$(fp "$TB/a2" add git --lazygit)"
+has "$out" "packaged only for Homebrew, and Homebrew is not installed" && ! grep -q lazygit "$T/fake.log" && pass "a Homebrew-only tool without Homebrew: a clear warning, nothing installed" || fail "a Homebrew-only tool without Homebrew: a clear warning" "$out"
+check "...the pack itself is still installed" test -L "$HOME/.config/fish/conf.d/pack-git.fish"
+out="$(fp "$TB/a2" show git)"; has "$out" "not installable here: it is packaged only for Homebrew" && pass "pack show says up front that it cannot be installed here" || fail "pack show says up front that it cannot be installed here" "$out"
+
+# no package manager at all
+fakehome; cp -R "$NOPM" "$TB/n1"
+out="$(fp "$TB/n1" add git --delta --lazygit)"
+has "$out" "no package manager found" && has "$out" "https://brew.sh" && pass "no package manager: the warning names what to install" || fail "no package manager: the warning names what to install" "$out"
+
+# without a flag and without a terminal nothing optional is touched, and the options are named
+fakehome; cp -R "$BOTH" "$TB/c1"; : > "$T/fake.log"
+out="$(fp "$TB/c1" add git </dev/null)"
+has "$out" "skip +delta: .*\(add it with: ./pack add git --delta\)" && [ ! -s "$T/fake.log" ] && pass "no flag, no terminal: nothing optional is installed, and each option is named" || fail "no flag, no terminal: nothing optional is installed" "$out"
+fakehome; cp -R "$BOTH" "$TB/c2"
+fp "$TB/c2" add git --no-tools >/dev/null; [ ! -s "$T/fake.log" ] && pass "--no-tools installs no tool" || fail "--no-tools installs no tool"
+fp "$TB/c2" add git --with-tools >/dev/null
+[ "$(grep -c install "$T/fake.log")" = 2 ] && ! test -L "$HOME/.config/fish/functions/demo_tag.fish" && pass "--with-tools means every tool, no part" || fail "--with-tools means every tool, no part" "$(cat "$T/fake.log")"
+fakehome; cp -R "$BOTH" "$TB/c3"
+fp "$TB/c3" add git --all >/dev/null
+check "--all means every option, parts and tools" bash -c "[ -L '$HOME/.config/fish/functions/demo_tag.fish' ] && grep -qx 'git+delta' '$HOME/.config/boosh/packs' && grep -qx 'git+lazygit' '$HOME/.config/boosh/packs'"
+
+# the typed fallback of the checklist (a terminal is not needed with --ask)
+fakehome; cp -R "$BOTH" "$TB/c4"
+out="$(printf 'tag bogus\n' | env PATH="$TB/c4" BOOSH_CATALOG="$FIXTURE_CATALOG" "$ROOT/pack" add git --ask 2>&1)"
+has "$out" "Optional for git" && has "$out" "'bogus' is not an option" && test -L "$HOME/.config/fish/functions/demo_tag.fish" && pass "--ask without a terminal: type the options you want" || fail "--ask without a terminal: type the options you want" "$out"
+
+# a tool is switched off like a part is removed; the program stays
+fakehome; cp -R "$BREWONLY" "$TB/d1"
+fp "$TB/d1" add git --delta >/dev/null
+out="$(fp "$TB/d1" remove git --delta)"
+has "$out" "keep +delta" && grep -qx "git~delta" "$HOME/.config/boosh/packs" && [ -x "$TB/d1/delta" ] && ! PATH="$TB/d1" git config --get core.pager >/dev/null && pass "remove --TOOL switches its settings off, the program stays" || fail "remove --TOOL switches its settings off, the program stays" "$out"
+fp "$TB/d1" add git >/dev/null
+check "a plain re-add keeps it off, though delta is on PATH" bash -c "! PATH='$TB/d1' git config --get core.pager"
+out="$(fp "$TB/d1" show git)"; has "$out" "--delta +tool +\[off\]" && pass "pack show marks it off" || fail "pack show marks it off" "$out"
+fp "$TB/d1" add git --delta >/dev/null
+check "--delta again switches it back on" bash -c "PATH='$TB/d1' git config --get core.pager | grep -qx delta && ! grep -q 'git~delta' '$HOME/.config/boosh/packs'"
+fp "$TB/d1" remove git >/dev/null
+check "removing the pack forgets every option marker" bash -c "! grep -q 'git' '$HOME/.config/boosh/packs' 2>/dev/null"
+out="$(fp "$TB/d1" add git --nonsense)"; has "$out" "has no option 'nonsense'" && pass "an unknown option is rejected" || fail "an unknown option is rejected" "$out"
+
+# ---- removing: what pack installed itself is offered for uninstalling; what was yours is never touched
+tl() { awk -F'\t' -v p="$1" -v c="$2" -v m="$3" '$1 == p && $2 == c && $3 == m { f = 1 } END { exit !f }' "$HOME/.config/boosh/tools"; }   # tl PACK CMD MANAGER
+fakehome; cp -R "$BREWONLY" "$TB/e1"
+fp "$TB/e1" add git --delta >/dev/null
+check "pack remembers the program it installed itself" tl git delta brew
+out="$(fp "$TB/e1" show git)"; has "$out" "installed by pack: ./pack remove git --purge-tools" && pass "pack show says which tool pack installed" || fail "pack show says which tool pack installed" "$out"
+out="$(fp "$TB/e1" remove git </dev/null)"
+has "$out" "keep +delta" && has "$out" "brew uninstall git-delta" && ! has "$out" "or ./pack remove git" && [ -x "$TB/e1/delta" ] && pass "remove without a terminal keeps the program and says how to remove it" || fail "remove without a terminal keeps the program and says how to remove it" "$out"
+
+fakehome; cp -R "$BREWONLY" "$TB/e2"; : > "$T/fake.log"
+fp "$TB/e2" add git --delta --lazygit >/dev/null
+out="$(fp "$TB/e2" remove git --purge-tools)"
+has "$out" "removed delta \(brew git-delta\)" && has "$out" "removed lazygit" && grep -q "brew uninstall git-delta" "$T/fake.log" && [ ! -e "$TB/e2/delta" ] && [ ! -e "$TB/e2/lazygit" ] && pass "--purge-tools uninstalls what the pack installed" || fail "--purge-tools uninstalls what the pack installed" "$out"
+check "...and the log of installed programs is empty again" bash -c "[ ! -s '$HOME/.config/boosh/tools' ]"
+
+fakehome; cp -R "$BREWONLY" "$TB/e3"; printf '#!/bin/sh\nexit 0\n' > "$TB/e3/delta"; chmod +x "$TB/e3/delta"; : > "$T/fake.log"
+out="$(fp "$TB/e3" add git --delta)"
+has "$out" "have +delta" && [ ! -s "$T/fake.log" ] && pass "a program that was already there is not installed again" || fail "a program that was already there is not installed again" "$out"
+fp "$TB/e3" remove git --purge-tools >/dev/null
+[ -x "$TB/e3/delta" ] && ! grep -q uninstall "$T/fake.log" && pass "a program that was yours is never uninstalled, even with --purge-tools" || fail "a program that was yours is never uninstalled" "$(cat "$T/fake.log")"
+
+# a program two packs chose stays until the last of them is removed
+fakehome; cp -R "$BREWONLY" "$TB/e4"; : > "$T/fake.log"
+fp "$TB/e4" add git --delta >/dev/null; fp "$TB/e4" add viewer --delta >/dev/null
+out="$(fp "$TB/e4" remove git --purge-tools)"
+has "$out" "keep +delta: the pack 'viewer' uses it too" && [ -x "$TB/e4/delta" ] && tl viewer delta brew && pass "a tool another pack uses stays, and that pack may remove it later" || fail "a tool another pack uses stays" "$out"
+out="$(fp "$TB/e4" remove viewer --purge-tools)"
+has "$out" "removed delta" && [ ! -e "$TB/e4/delta" ] && pass "...and the last pack that uses it can remove it" || fail "the last pack that uses it can remove it" "$out"
+
+# one option at a time, an already-gone program, dry run, apt
+fakehome; cp -R "$BREWONLY" "$TB/e5"
+fp "$TB/e5" add git --delta --lazygit >/dev/null
+out="$(fp "$TB/e5" remove git --delta --purge-tools)"
+has "$out" "removed delta" && [ ! -e "$TB/e5/delta" ] && [ -x "$TB/e5/lazygit" ] && ! PATH="$TB/e5" git config --get core.pager >/dev/null && pass "remove --TOOL --purge-tools: only that tool goes, its settings are detached" || fail "remove --TOOL --purge-tools" "$out"
+fp "$TB/e5" remove git --keep-tools >/dev/null
+[ -x "$TB/e5/lazygit" ] && pass "--keep-tools keeps every program" || fail "--keep-tools keeps every program"
+fakehome; cp -R "$BREWONLY" "$TB/e6"
+fp "$TB/e6" add git --delta >/dev/null; rm -f "$TB/e6/delta"
+out="$(fp "$TB/e6" remove git --purge-tools)"
+! has "$out" "keep +delta|removed delta" && [ ! -s "$HOME/.config/boosh/tools" ] && pass "a program that is already gone is forgotten quietly" || fail "a program that is already gone is forgotten quietly" "$out"
+fakehome; cp -R "$BREWONLY" "$TB/e7"; : > "$T/fake.log"
+fp "$TB/e7" add git --delta >/dev/null
+out="$(fp "$TB/e7" remove git --purge-tools --dry-run)"
+has "$out" "would run" && [ -x "$TB/e7/delta" ] && tl git delta brew && ! grep -q uninstall "$T/fake.log" && pass "--dry-run uninstalls nothing and keeps the log" || fail "--dry-run uninstalls nothing and keeps the log" "$out"
+fakehome; cp -R "$APTONLY" "$TB/e8"; : > "$T/fake.log"
+fp "$TB/e8" add git --delta >/dev/null
+out="$(fp "$TB/e8" remove git --purge-tools)"
+has "$out" "sudo will ask" && grep -q "apt-get remove git-delta" "$T/fake.log" && [ ! -e "$TB/e8/delta" ] && pass "a program installed with apt is removed with apt (sudo is announced)" || fail "a program installed with apt is removed with apt" "$out"
+out="$(fp "$TB/e8" add git --purge-tools --keep-tools)"; has "$out" "contradict" && pass "--purge-tools and --keep-tools together are refused" || fail "--purge-tools and --keep-tools together are refused" "$out"
+if [ "${BOOSH_TEST_PTY:-0}" = 1 ] && command -v script >/dev/null 2>&1; then
+  fakehome; cp -R "$BREWONLY" "$TB/e9"
+  fp "$TB/e9" add git --delta >/dev/null
+  { sleep 1; printf '\033[A\n'; sleep 1; } | env TERM=xterm PATH="$TB/e9" BOOSH_CATALOG="$FIXTURE_CATALOG" "$(command -v script)" -qec "$ROOT/pack remove git" /dev/null >/dev/null 2>&1
+  [ ! -e "$TB/e9/delta" ] && pass "in a terminal remove asks, and \"yes\" uninstalls" || fail "in a terminal remove asks, and \"yes\" uninstalls"
+fi
+rm -rf "$TB"
 
 echo "== pack sources: catalog, GitHub (fisher style), folders"
 cleanup; new_home
@@ -414,11 +587,18 @@ if [ "${BOOSH_TEST_PTY:-0}" = 1 ] && command -v script >/dev/null 2>&1; then
 source "$ROOT/lib/menu.sh"
 select_menu PICK "Pick:" a a b c
 select_slider SZ "Size:" 8 32 0.5 13
+select_multi MM "Multi:" "a" a b c
 echo "RESULT=\$PICK/\$SZ"
+echo "MULTI=[\$MM]"
 EOF
   chmod +x "$HOME/menu-test.sh"
-  out="$( { sleep 0.5; printf '\033[B\033[B\n'; sleep 0.5; printf '\033[C\033[C\n'; sleep 0.5; } | script -qec "$HOME/menu-test.sh" /dev/null 2>&1 | tr -d '\r')"
+  out="$( { sleep 0.5; printf '\033[B\033[B\n'; sleep 0.5; printf '\033[C\033[C\n'; sleep 0.5; printf '\033[B \033[B  \n'; sleep 0.5; } | script -qec "$HOME/menu-test.sh" /dev/null 2>&1 | tr -d '\r')"
   has "$out" "RESULT=c/14" && pass "arrow keys drive the menu and the slider" || fail "arrow keys drive the menu and the slider" "$out"
+  has "$out" 'MULTI=\[a b\]' && pass "the checklist: Space toggles, Enter confirms (a stays, b is added, c toggled twice)" || fail "the checklist: Space toggles, Enter confirms" "$out"
+  # the real thing: ./pack add in a terminal offers the options in one checklist (first item is --tag)
+  cleanup; new_home
+  { sleep 1; printf ' \n'; sleep 1; } | env BOOSH_CATALOG="$FIXTURE_CATALOG" script -qec "$ROOT/pack add git" /dev/null >/dev/null 2>&1
+  check "pack add git in a terminal: the checklist installs what you tick (and only that)" bash -c "[ -L '$HOME/.config/fish/functions/demo_tag.fish' ] && ! grep -q 'git+delta' '$HOME/.config/boosh/packs'"
 else
   echo "  skip"
 fi

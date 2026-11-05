@@ -68,7 +68,7 @@ Non-interactive examples:
 ./install.sh --only prompt                           # just the prompt, leave Ghostty and the editor alone
 ./install.sh --print                                 # show the generated config, write nothing
 ./install.sh --cheatsheet                            # print the keybind cheatsheet
-./pack add git docker --no-tools                     # packs without installing extra programs
+./pack add git docker --none                         # packs without any optional part or program
 ```
 
 ## What you choose
@@ -113,10 +113,20 @@ $ ./pack list
   docker   available  fish abbreviations for docker and compose (d, dps, dcup, dcl...)
   git      available  fish abbreviations (gst, gd, gl...), safe git defaults, git info in the boosh prompt
 
-$ ./pack add git          # asks (default: no) before installing lazygit / delta
-$ ./pack status           # health check
-$ ./pack remove git       # removes the files again; installed programs are left alone
+$ ./pack add git                  # in a terminal: one checklist of the pack's options (Space toggles, Enter confirms)
+$ ./pack add git --tag --delta    # the same choice as flags (also the way for scripts)
+$ ./pack status                   # health check
+$ ./pack remove git               # removes the files again; asks about programs that pack itself installed
 ```
+
+**Options.** Everything optional in a pack is an *option*, chosen the same way whatever it is: a **part** (an
+optional folder of the pack, such as `gtag`) or a **tool** (an optional program, such as `lazygit` or `delta`). In a
+terminal `./pack add NAME` shows one checklist of what is not on yet; anywhere else the options are flags:
+`--tag`, `--delta`, ... , `--all` (every option), `--none` (none, and no question), `--with-tools` / `--no-tools`
+(every tool / no tool). Without a terminal and without flags nothing optional is touched, and each skipped option is
+named. A choice is remembered: a re-run of `./pack add NAME` keeps it, `./pack remove NAME --OPTION` switches one option
+off (a part is unlinked; for a tool its git settings are detached), and
+`./pack show NAME` lists the options with their state and, for a tool, how it would be installed here.
 
 A pack is a folder of the catalog (or the root of a repository):
 
@@ -137,8 +147,17 @@ Safety rules built into `pack`:
 - `delta` is configured in its own file, so removing the program cannot leave `git diff` broken; `./pack status` warns
   and `./pack add git` switches that file off.
 - Files that are not yours to touch (a regular file in the way, a symlink pointing elsewhere) are backed up or skipped.
-- Optional tools are installed with Homebrew if present, otherwise with `apt` when the package exists there;
-  otherwise you are told to install it yourself.
+- **Removing programs.** `pack` records every program it installed itself (`~/.config/boosh/tools`). When you remove the
+  pack, or switch a tool off with `./pack remove NAME --TOOL`, it offers to uninstall exactly those (a yes/no question in a
+  terminal; `--purge-tools` says yes, `--keep-tools` says no; without a terminal and without a flag they are kept and the
+  command to remove them is printed). A program that was already on your machine is never uninstalled, with or without
+  the flags, and a program another installed pack uses stays until the last of those packs is removed.
+- **Which package manager?** It is found, not configured: for each tool you chose that is missing, Homebrew is used if it
+  is installed (on `PATH`, or at one of its usual places) and the tool has a Homebrew package; otherwise `apt` if apt has the
+  package (`sudo` is announced); otherwise nothing is installed and the warning says why (no package manager found,
+  packaged only for Homebrew and Homebrew is not installed, ...) so you can install it yourself. The two are never mixed
+  silently, and a tool installed outside `PATH` gets a hint (`fish_add_path ...`) and its git settings stay off until it
+  is found.
 
 ### Where packs come from
 
