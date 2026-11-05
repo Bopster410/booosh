@@ -69,7 +69,7 @@ menu_desc() { # menu_desc VAR OPTION
     LIGATURES:no)      echo "every character is drawn separately" ;;
     DO_IMPORT:yes)     echo "your settings keep applying on top of boosh's; a .bak copy is kept too" ;;
     DO_IMPORT:no)      echo "only boosh's choices; your old config is kept as a .bak copy" ;;
-    PROMPT:boosh)      echo "two lines, git status computed in the background, no plugin" ;;
+    PROMPT:boosh)      echo "two lines, no plugin; git info comes with the git pack (./pack add git)" ;;
     PROMPT:default)    echo "fish's own prompt, nothing is installed" ;;
     EDITOR_NAME:none)  echo "do not install an editor config" ;;
     EDITOR_NAME:*)     [ -f "$SRC/editors/$2/editor.conf" ] && editor_get "$2" DESCRIPTION || true ;;
@@ -354,7 +354,7 @@ prompt_preview() { # prompt_preview OPTION -> 3 lines
     boosh)
       printf '  \033[1;34m~/app\033[0m \033[32mmain\033[0m \033[36m%s1\033[0m \033[32m+2\033[0m \033[33m!1\033[0m \033[34m?3\033[0m \033[33m5s\033[0m\n' "$up"
       printf '  \033[35m%s\033[0m\n' "$sym"
-      printf '  %sgit info appears a moment after the prompt; its look is one function%s\n' "$D" "$R" ;;
+      printf '  %sgit info (git pack) appears a moment after the prompt%s\n' "$D" "$R" ;;
     *)
       printf '  \033[1;34m~/app\033[0m \033[32m(main)\033[0m%s\n' "$box"
       printf '\n'
@@ -398,7 +398,7 @@ Parameters
   --blink | --no-blink            cursor blinking
   --opacity N         background opacity, 0..1
 Prompt
-  --prompt NAME       boosh | default  (boosh = two lines, git status computed in the background)
+  --prompt NAME       boosh | default  (boosh = two lines; git info comes with the git pack)
 Editor
   --editor NAME       vim | nano | none  (links its config, sets EDITOR in fish)
   --no-vim            same as --editor none (kept for old command lines)
@@ -1090,7 +1090,17 @@ apply_prompt_live() {
     return 0
   fi
   for rel in "${PROMPT_FILES[@]}"; do link "$BH_CORE/fish/prompt/$rel" "$fdir/$rel" core; done
+  # files an older boosh prompt had (git info used to be part of it) and this one does not: drop their dangling links
+  if [ "$DRY" = 0 ]; then
+    for f in "$fdir"/functions/*.fish "$fdir"/conf.d/*.fish "$fdir"/completions/*.fish; do
+      [ -L "$f" ] && [ ! -e "$f" ] || continue
+      case "$(readlink "$f")" in "$BH_CORE/fish/prompt/"*|"$BOOSH_HOME/core/fish/prompt/"*) rm -f "$f"; echo "removed $f (no longer part of the prompt)" ;; esac
+    done
+  fi
   [ "$DRY" = 1 ] || mf_commit install:prompt
+  if ! mf_owners_like pack:git | grep -q .; then
+    echo "note    git info in the prompt comes with the git pack: ./pack add git"
+  fi
 }
 if want prompt; then apply_prompt_live; fi
 

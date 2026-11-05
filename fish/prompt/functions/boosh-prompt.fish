@@ -2,7 +2,11 @@
 # Settings are universal variables (boosh_prompt_*): they apply to the next prompt in every open terminal and
 # survive restarts. Nothing is changed unless every flag you gave is valid.
 function boosh-prompt --description 'Show or change the boosh prompt settings'
-    set -l all_fields branch ahead behind staged modified untracked conflicts stash
+    # the git parts are provided by the git pack; without it there is nothing to switch
+    set -l has_git 0
+    functions -q __boosh_git_fields; and set has_git 1
+    set -l all_fields
+    test $has_git = 1; and set all_fields (__boosh_git_fields)
     argparse -n boosh-prompt h/help s/show r/reset 'lines=' 'gap=' 'symbol=' 'git=' 'fields=' 'time=' 'time-after=' 'status=' 'path=' -- $argv
     or return 2
 
@@ -30,7 +34,10 @@ function boosh-prompt --description 'Show or change the boosh prompt settings'
     if set -q _flag_path; and not contains -- $_flag_path short full
         set -a errors "--path must be short or full"
     end
-    if set -q _flag_git
+    if test $has_git = 0; and begin set -q _flag_git; or set -q _flag_fields; end
+        set -a errors "--git and --fields need the git pack: ./pack add git"
+    end
+    if set -q _flag_git; and test $has_git = 1
         set v_git (__boosh_prompt_bool $_flag_git)
         test -n "$v_git"; or set -a errors "--git must be on or off"
     end
@@ -51,7 +58,7 @@ function boosh-prompt --description 'Show or change the boosh prompt settings'
             set -a errors "--time-after must be milliseconds (3000) or seconds (3s)"
         end
     end
-    if set -q _flag_fields
+    if set -q _flag_fields; and test $has_git = 1
         set v_fields (string split -n , -- (string replace -a ' ' , -- $_flag_fields))
         if test "$v_fields" = all
             set v_fields $all_fields
@@ -141,8 +148,8 @@ function __boosh_prompt_put --argument-names name
 end
 
 function __boosh_prompt_show
-    set -l git_all branch ahead behind staged modified untracked conflicts stash
-    set -l fields $git_all
+    set -l fields
+    functions -q __boosh_git_fields; and set fields (__boosh_git_fields)
     set -q boosh_prompt_git_fields; and set fields $boosh_prompt_git_fields
     set -l lines (test (__boosh_opt boosh_prompt_multiline true) = false; and echo 1; or echo 2)
     set -l gap (__boosh_opt boosh_prompt_gap 1)
@@ -150,13 +157,15 @@ function __boosh_prompt_show
     test "$gap" = false; and set gap 0
     set -l ms (__boosh_opt boosh_prompt_duration_ms 3000)
     set -l git (test (count $fields) -eq 0; and echo off; or echo on)
+    set -l git_note "  $fields"
+    functions -q __boosh_git_fields; or begin set git off; set git_note "  (git pack not installed: ./pack add git)"; end
 
     echo "boosh prompt settings (* = changed from the default)"
     printf '  %-9s %s%s\n' lines (__boosh_prompt_mark boosh_prompt_multiline) $lines
     printf '  %-9s %s%s empty line(s) between prompts\n' gap (__boosh_prompt_mark boosh_prompt_gap) $gap
     printf '  %-9s %s%s\n' symbol (__boosh_prompt_mark boosh_prompt_symbol) (__boosh_opt boosh_prompt_symbol ❯)
     printf '  %-9s %s%s\n' path (__boosh_prompt_mark boosh_prompt_path) (__boosh_opt boosh_prompt_path short)
-    printf '  %-9s %s%s  %s\n' git (__boosh_prompt_mark boosh_prompt_git_fields) $git "$fields"
+    printf '  %-9s %s%s%s\n' git (__boosh_prompt_mark boosh_prompt_git_fields) $git "$git_note"
     printf '  %-9s %s%s  (commands slower than %s ms)\n' time (__boosh_prompt_mark boosh_prompt_show_time) (test (__boosh_opt boosh_prompt_show_time true) = false; and echo off; or echo on) $ms
     printf '  %-9s %s%s  (exit code after a failed command)\n' status (__boosh_prompt_mark boosh_prompt_show_status) (test (__boosh_opt boosh_prompt_show_status true) = false; and echo off; or echo on)
 end
@@ -173,7 +182,7 @@ function __boosh_prompt_help
   boosh-prompt --gap N              empty lines between prompts, 0 to 5
   boosh-prompt --symbol TEXT        the character on the last line, for example ">" or "λ"
   boosh-prompt --path short|full    ~/a/b/c as shortened (~/a/b/c) or in full
-  boosh-prompt --git on|off         git information; off also stops the background job
+  boosh-prompt --git on|off         git information (needs the git pack: ./pack add git); off also stops the background job
   boosh-prompt --fields LIST        git parts, comma separated, shown in this order:
                                     branch ahead behind staged modified untracked conflicts stash (or: all)
   boosh-prompt --time on|off        time of slow commands

@@ -35,7 +35,7 @@ parameters), links an editor config, and keeps everything reversible: it validat
 - **Sliders** for font size (8–32, step 0.5) and background opacity (0.3–1, step 0.05).
 - **Presets**: three appearances (`minimal`, `classic`, `borderless`) and two keybind sets (`alt`, `default`).
 - **Editor choice**: `vim` or `nano` (a ready config for each), or none. Adding another editor is one folder.
-- **A small fish prompt of its own**: two lines, git status computed in the background, configured with one command,
+- **A small fish prompt of its own**: two lines, configured with one command (git info in it comes with the `git` pack),
   no plugin manager (see [The prompt](#the-prompt)). Or keep fish's own, or your own plugin.
 - **Cheatsheet**: a markdown table of your keys, generated for exactly the setup you chose.
 - **Packs**: optional terminal setups on top of the base. Included: `git` and `docker`. Each pack only drops files into
@@ -111,7 +111,7 @@ search); `Ctrl`+arrows still move by word.
 ```
 $ ./pack list
   docker   available  fish abbreviations for docker and compose (d, dps, dcup, dcl...)
-  git      available  fish abbreviations (gst, gd, gl...), safe git defaults, git status for fish's own prompt
+  git      available  fish abbreviations (gst, gd, gl...), safe git defaults, git info in the boosh prompt
 
 $ ./pack add git          # asks (default: no) before installing lazygit / delta
 $ ./pack status           # health check
@@ -123,7 +123,10 @@ A pack is a folder in `packs/<name>/`:
 | File | What it does |
 |---|---|
 | `pack.conf` | `DESCRIPTION=...` and optional `TOOL=command\|brew package\|apt package\|description` lines. |
-| `fish.fish` | linked to `~/.config/fish/conf.d/pack-<name>.fish` (abbreviations, functions). |
+| `fish.fish` | linked to `~/.config/fish/conf.d/pack-<name>.fish` (abbreviations, startup code). |
+| `functions/*.fish` | each linked to `~/.config/fish/functions/` (autoloaded fish functions). |
+| `completions/*.fish` | each linked to `~/.config/fish/completions/` (tab completion). |
+| `extras/NAME/` | an **optional part** with its own `extra.conf` (`DESCRIPTION=...`) and `fish.fish`, `functions/`, `completions/`. Installed only on request: `./pack add PACK --NAME`; removed alone with `./pack remove PACK --NAME`. A plain `./pack add PACK` keeps the parts you already installed. |
 | `gitconfig` | linked to `~/.config/git/pack-<name>.conf` and pulled in with one `include.path` line. |
 | `gitconfig.<tool>` | the same, but **only while `<tool>` is on `PATH`** (for example `delta` as git's pager). |
 
@@ -136,8 +139,10 @@ Safety rules built into `pack`:
 - Optional tools are installed with Homebrew if present, otherwise with `apt` when the package exists there;
   otherwise you are told to install it yourself.
 
-Included packs: **git** (abbreviations such as `gst`, `gd`, `gcm`, `gl`, git status for fish's own prompt (the boosh prompt has its own), and a few
-safe settings: `init.defaultBranch`, `push.autoSetupRemote`, `fetch.prune`, `rerere.enabled`) and **docker**
+Included packs: **git** (abbreviations such as `gst`, `gd`, `gcm`, `gl`, git info in the boosh prompt (branch, ahead/behind, staged, modified, untracked, stashes; computed in the background) and in fish's own prompt, and a few
+safe settings: `init.defaultBranch`, `push.autoSetupRemote`, `fetch.prune`, `rerere.enabled`, and output/convenience ones such as
+`merge.conflictStyle=zdiff3`, `diff.algorithm=histogram`, `branch.sort=-committerdate`, `tag.sort=version:refname`; how `pull` works is never changed),
+and an optional part `--tag`: `./pack add git --tag` adds `gtag patch|minor|major` (the next semver tag; asks before creating it, never pushes) and **docker**
 (abbreviations such as `d`, `dps`, `dex`, `dcup`, `dcl`; `docker compose` vs `docker-compose` is detected when you press
 space, so shell startup stays fast).
 
@@ -153,7 +158,8 @@ boosh ships its own small prompt for fish (`fish/prompt/`, a few hundred lines w
 - **Line 1**: path, git status, and the time of a slow command (3 s or more). **Line 2**: the symbol; after a failed
   command it turns red and shows the exit code (`✘1 ❯`). An empty line separates each prompt from the previous
   command's output (not before the very first one).
-- **Git is computed in the background.** One `git status --porcelain=v2` call runs in a separate process, so the prompt
+- **Git info comes with the `git` pack** (`./pack add git`); without it the prompt simply has no git part, and
+  `boosh-prompt --git/--fields` tell you to add the pack. **It is computed in the background.** One `git status --porcelain=v2` call runs in a separate process, so the prompt
   never waits for it; the information appears a moment later and the prompt repaints itself. Markers: `⇡ ⇣` commits to
   push / pull, `+` staged, `!` modified, `?` untracked, `✖` conflicts, `*` stashes. A detached HEAD shows `@abc1234`.
 - **Cost.** In one run here (fish start plus the work before a prompt, small repo / 30 000-file repo) it took 26 / 27 ms,
@@ -176,8 +182,8 @@ boosh ships its own small prompt for fish (`fish/prompt/`, a few hundred lines w
   | `--reset` | back to the defaults |
 
   Flags can be combined: `boosh-prompt --lines 1 --gap 0 --fields branch,modified,untracked`.
-  Settings are the universal variables `boosh_prompt_*`; symbols and colours of the git part are in one function,
-  `__boosh_git_format`.
+  Settings are the universal variables `boosh_prompt_*`; symbols and colours of the git part are in one function
+  of the git pack, `__boosh_git_format`.
 - **Install / remove**: `./install.sh --only prompt`, or `--prompt default` to go back to fish's own prompt. If Hydro,
   Tide or Pure is installed, boosh does not fight over `fish_prompt`: it tells you to remove that plugin first.
 - The technique (result delivered by a signal, then a repaint) is the one Hydro uses; the code is separate.
@@ -269,7 +275,7 @@ BOOSH_TEST_PTY=1 bash tests/smoke.sh      # also drives the arrow-key menu throu
 ```
 
 The suite covers the installer flags and validation, idempotence, `--dry-run`, the cheatsheet, and the whole pack
-lifecycle (including conflicts and the `delta` safeguard), the prompt install and the prompt's git parser (dirty, detached
+lifecycle (including conflicts and the `delta` safeguard), the prompt install and the git pack's parser (dirty, detached
 HEAD, merge conflict, not a repo), the stable core (generations, rollback, importing an old config, uninstall, `--check`, and
 that everything keeps working after the repository is deleted), formatting, command time and, with the pty flag, the asynchronous repaint in a live fish. It does not need `ghostty` or `fish`; checks that need them
 are skipped.
