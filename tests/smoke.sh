@@ -132,6 +132,122 @@ else
   echo "  skip  fish is not installed"
 fi
 
+echo "== prompt (install side)"
+cleanup; new_home
+"$ROOT/install.sh" --yes --no-cheatsheet >/dev/null 2>&1
+FD="$HOME/.config/fish"
+check "prompt files are linked by default" bash -c "[ -L '$FD/functions/fish_prompt.fish' ] && [ -L '$FD/conf.d/boosh_prompt.fish' ] && [ -L '$FD/functions/__boosh_git_worker.fish' ]"
+"$ROOT/install.sh" --yes --no-cheatsheet --prompt default >/dev/null 2>&1
+check "--prompt default removes only our links" bash -c "[ ! -e '$FD/functions/fish_prompt.fish' ] && [ ! -e '$FD/conf.d/boosh_prompt.fish' ] && [ -e '$FD/conf.d/00-boosh-core.fish' ]"
+before="$(find "$HOME" \( -type f -o -type l \) | sort)"
+"$ROOT/install.sh" --yes --only prompt --prompt boosh >/dev/null 2>&1
+check "--only prompt links the prompt" test -L "$FD/functions/fish_prompt.fish"
+check "--only prompt leaves ghostty alone" bash -c "[ ! -e '$HOME/.config/ghostty/cheatsheet.md.new' ] && [ \"\$(cat '$HOME/.config/ghostty/.install-choices' | grep -c '^PROMPT=default')\" = 1 ]"
+"$ROOT/install.sh" --yes --only prompt --prompt default >/dev/null 2>&1
+: > "$FD/conf.d/hydro.fish"; echo "# theirs" > "$FD/functions/fish_prompt.fish"
+out="$("$ROOT/install.sh" --yes --only prompt --prompt boosh 2>&1)"
+has "$out" "skip +prompt: Hydro" && pass "an installed Hydro is detected" || fail "an installed Hydro is detected" "$out"
+check "...and the foreign prompt is left untouched" grep -q "^# theirs" "$FD/functions/fish_prompt.fish"
+rm -f "$FD/conf.d/hydro.fish"
+"$ROOT/install.sh" --yes --only prompt --prompt boosh >/dev/null 2>&1
+check "a plain foreign fish_prompt.fish is backed up, not lost" test -f "$FD/functions/fish_prompt.fish.bak"
+for bad in "--prompt nope" "--only nonsense"; do
+  # shellcheck disable=SC2086
+  if "$ROOT/install.sh" --yes --dry-run $bad >/dev/null 2>&1; then fail "rejects $bad"; else pass "rejects $bad"; fi
+done
+
+echo "== prompt (behaviour; needs fish and git)"
+if command -v fish >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
+  P="$ROOT/fish/prompt"
+  g() { git -c user.name=t -c user.email=t@t -c init.defaultBranch=main "$@"; }
+  SC="$T/scenario"; mkdir -p "$SC"
+  ( cd "$SC" && g init -q --bare -b main origin.git && g clone -q origin.git a 2>/dev/null
+    cd a && g checkout -q -b main 2>/dev/null; echo 1 > f1; echo 1 > f2; echo base > c.txt; g add -A; g commit -qm one; g push -q -u origin main 2>/dev/null
+    cd "$SC" && g clone -q origin.git b 2>/dev/null
+    ( cd a && echo 2 >> f1 && g commit -qam two && g push -q origin main )
+    cd b && echo local > f3 && g add f3 && g commit -qm local && g fetch -q && echo s > stashme && g add stashme && g stash -q \
+      && echo staged > f4 && g add f4 && echo mod >> f2 && echo u1 > u1 && echo u2 > u2 ) >/dev/null 2>&1
+  worker() { # worker NAME -> "branch ahead behind staged modified untracked conflicted stash"
+    local out="$SC/out.$1"; rm -f "$out"
+    fish --no-config -c 'source $argv[1]; __boosh_git_worker $argv[2] $argv[3] 999999' "$P/functions/__boosh_git_worker.fish" "$SC/b" "$out" </dev/null >/dev/null 2>&1
+    sed 1d "$out" 2>/dev/null | tr '\n' ' ' | sed 's/ $//'
+  }
+  [ "$(worker dirty)" = "main 1 1 1 1 2 0 1" ] && pass "worker: ahead, behind, staged, modified, untracked, stash" || fail "worker: ahead, behind, staged, modified, untracked, stash" "$(worker dirty)"
+  ( cd "$SC/b" && g stash drop -q; g reset -q --hard origin/main; g clean -qfd; g checkout -q --detach HEAD ) >/dev/null 2>&1
+  has "$(worker detached)" '^@[0-9a-f]{7} 0 0 0 0 0 0 0$' && pass "worker: detached HEAD shows @sha" || fail "worker: detached HEAD shows @sha" "$(worker detached)"
+  ( cd "$SC/b" && g checkout -q main && echo B2 > c.txt && g commit -qam B2 && cd ../a && echo A2 > c.txt && g commit -qam A2 && g push -q origin main && cd ../b && g fetch -q && g merge origin/main ) >/dev/null 2>&1
+  [ "$(worker conflict)" = "main 1 1 0 0 0 1 0" ] && pass "worker: merge conflict counted" || fail "worker: merge conflict counted" "$(worker conflict)"
+  ( cd "$SC/b" && g merge --abort ) >/dev/null 2>&1
+  out="$(fish --no-config -c 'source $argv[1]; __boosh_git_worker /tmp $argv[2] 999999' "$P/functions/__boosh_git_worker.fish" "$SC/out.nogit" </dev/null 2>&1; test -f "$SC/out.nogit" && echo WROTE || echo nothing)"
+  [ "$out" = nothing ] && pass "worker: a directory that is not a repo writes nothing" || fail "worker: a directory that is not a repo writes nothing"
+
+  strip() { sed -E 's/\x1b\][^\x07\x1b]*(\x07|\x1b\\)//g; s/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\(B//g'; }
+  "$ROOT/install.sh" --yes --only prompt --prompt default >/dev/null 2>&1; rm -f "$FD/functions/fish_prompt.fish.bak"
+  "$ROOT/install.sh" --yes --only prompt --prompt boosh >/dev/null 2>&1
+  out="$(fish -i -c 'set -g __boosh_git_data main 2 1 3 4 5 1 2; __boosh_git_format' 2>&1 | strip)"
+  [ "$out" = "main ⇡2 ⇣1 +3 !4 ?5 ✖1 *2" ] && pass "format: all counters" || fail "format: all counters" "$out"
+  out="$(fish -i -c 'set -g __boosh_git_data main 0 0 0 0 0 0 0; __boosh_git_format' 2>&1 | strip)"
+  [ "$out" = "main" ] && pass "format: zero counters are hidden" || fail "format: zero counters are hidden" "$out"
+  dur() { fish -i -c "set -g CMD_DURATION $1; emit fish_postexec x; echo \$__boosh_duration" 2>&1 | strip | tail -n 1; }
+  [ "$(dur 1500)" = "" ] && [ "$(dur 5400)" = "5s" ] && [ "$(dur 65000)" = "1m5s" ] && [ "$(dur 3725000)" = "1h2m5s" ] && pass "command duration text" || fail "command duration text" "$(dur 1500)|$(dur 5400)|$(dur 65000)|$(dur 3725000)"
+  # ---- the boosh-prompt command (settings are universal variables inside the throw-away $HOME)
+  bp() { fish -i -c "$1" 2>&1 | strip | grep -v "Welcome to fish"; }
+  second() { # the 2nd prompt of a session, newlines shown as \n
+    fish -i -c "$1; printf '@@'; emit fish_prompt; emit fish_prompt; fish_prompt" 2>/dev/null | strip | awk 'BEGIN{RS="@@"} NR==2{printf "%s", $0}' | sed ':a;N;$!ba;s/\n/\\n/g'; }
+  fish -c "set -U fish_greeting ''" >/dev/null 2>&1   # no banner in front of the output we compare
+  cd "$HOME"
+  bp 'boosh-prompt --reset >/dev/null'
+  has "$(bp 'boosh-prompt')" "lines +2" && has "$(bp 'boosh-prompt')" "git +on" && pass "boosh-prompt: no flags shows the settings" || fail "boosh-prompt: no flags shows the settings"
+  bp 'boosh-prompt --lines 1 --gap 0 >/dev/null'
+  a="$(second 'true')"; [[ "$a" != *'\n'* ]] && pass "boosh-prompt --lines 1 --gap 0: one line, no gap" || fail "boosh-prompt --lines 1 --gap 0: one line, no gap" "$a"
+  bp 'boosh-prompt --lines 2 --gap 2 >/dev/null'
+  a="$(second 'true')"; [ "$a" = '\n\n~/\n❯ ' ] || [ "${a#'\n\n'}" != "$a" ] && pass "boosh-prompt --gap 2: two empty lines before the prompt" || fail "boosh-prompt --gap 2: two empty lines before the prompt" "$a"
+  bp "boosh-prompt --gap 1 --symbol '>' >/dev/null"
+  a="$(second 'true')"; [[ "$a" == *'> ' ]] && pass "boosh-prompt --symbol" || fail "boosh-prompt --symbol" "$a"
+  bp 'boosh-prompt --status off >/dev/null'
+  a="$(second 'false')"; [[ "$a" != *'✘'* ]] && pass "boosh-prompt --status off hides the exit code" || fail "boosh-prompt --status off hides the exit code" "$a"
+  bp 'boosh-prompt --status on --time off >/dev/null'
+  a="$(second 'set -g CMD_DURATION 7000; emit fish_postexec x')"; [[ "$a" != *'7s'* ]] && pass "boosh-prompt --time off hides the command time" || fail "boosh-prompt --time off hides the command time" "$a"
+  bp 'boosh-prompt --time on --time-after 5s >/dev/null'
+  has "$(bp 'boosh-prompt')" "slower than 5000 ms" && pass "boosh-prompt --time-after 5s means 5000 ms" || fail "boosh-prompt --time-after 5s means 5000 ms"
+  bp 'boosh-prompt --fields modified,branch >/dev/null'
+  out="$(bp 'set -g __boosh_git_data main 2 1 3 4 5 1 2; __boosh_git_format')"
+  [ "$out" = "!4 main" ] && pass "boosh-prompt --fields: chosen parts, in the given order" || fail "boosh-prompt --fields: chosen parts, in the given order" "$out"
+  out="$(cd "$ROOT" && bp 'boosh-prompt --git on >/dev/null; emit fish_prompt; echo "pid=[$__boosh_git_pid]"')"
+  has "$out" 'pid=\[[0-9]+\]' && pass "git on: a background job is started" || fail "git on: a background job is started" "$out"
+  out="$(cd "$ROOT" && bp 'boosh-prompt --git off >/dev/null; emit fish_prompt; echo "pid=[$__boosh_git_pid]"')"
+  has "$out" 'pid=\[\]' && pass "boosh-prompt --git off: no background job at all" || fail "boosh-prompt --git off: no background job at all" "$out"
+  bp 'boosh-prompt --git on >/dev/null'
+  before="$(bp 'echo $boosh_prompt_gap')"
+  bp 'boosh-prompt --gap 3 --lines 7' >/dev/null 2>&1
+  [ "$(bp 'echo $boosh_prompt_gap')" = "$before" ] && pass "boosh-prompt: one bad flag changes nothing" || fail "boosh-prompt: one bad flag changes nothing"
+  for bad in "--lines 7" "--gap 9" "--git maybe" "--fields nope" "--git off --fields branch" "--time-after soon" "--path wide" "--bogus"; do
+    out="$(bp "boosh-prompt $bad; echo exit=\$status")"
+    has "$out" 'exit=2' && pass "boosh-prompt rejects $bad" || fail "boosh-prompt rejects $bad" "$out"
+  done
+  bp 'boosh-prompt --reset >/dev/null'
+  [ "$(bp 'set -Un | string match -r "^boosh_prompt_.*" | count')" = 0 ] && pass "boosh-prompt --reset erases every setting" || fail "boosh-prompt --reset erases every setting"
+  out="$(bp "complete -C 'boosh-prompt --symbol '"; bp "complete -C 'boosh-prompt --lines '")"
+  has "$out" '^❯' && has "$out" '^1' && ! has "$out" 'syntax error' && pass "tab completion for boosh-prompt works (values are valid fish)" || fail "tab completion for boosh-prompt works" "$out"
+  cd "$ROOT"
+
+  firstbyte() { fish -i -c "$1; printf '@@'; fish_prompt" 2>/dev/null | strip | tr -d '\r' | awk 'BEGIN{RS="@@"} NR==2{printf "%s", $0}' | head -c 1 | od -An -c | tr -d ' '; }
+  a="$(firstbyte 'emit fish_prompt')"; b="$(firstbyte 'emit fish_prompt; emit fish_prompt')"; c="$(firstbyte 'set -g boosh_prompt_gap false; emit fish_prompt; emit fish_prompt')"
+  [ "$a" != '\n' ] && [ "$b" = '\n' ] && [ "$c" != '\n' ] && pass "prompt: empty line before every prompt but the first (boosh_prompt_gap=false turns it off)" || fail "prompt: empty line before every prompt but the first" "first=$a second=$b gap-off=$c"
+  out="$(fish -i -c 'set -g __boosh_git_data main 0 0 0 0 0 0 0; false; fish_prompt' 2>&1 | strip)"
+  has "$out" '✘1' && pass "prompt: exit code shown after a failure" || fail "prompt: exit code shown after a failure" "$out"
+  one="$(fish -i -c 'set -g boosh_prompt_multiline false; true; fish_prompt' 2>&1 | strip | wc -l | tr -d ' ')"
+  two="$(fish -i -c 'true; fish_prompt' 2>&1 | strip | wc -l | tr -d ' ')"
+  [ "$one" = "0" ] && [ "$two" = "1" ] && pass "prompt: two lines by default, one with boosh_prompt_multiline=false" || fail "prompt: two lines by default, one with boosh_prompt_multiline=false" "newlines: one-line mode=$one, default=$two"
+  if [ "${BOOSH_TEST_PTY:-0}" = 1 ] && command -v script >/dev/null 2>&1; then
+    ( cd "$SC/b" && echo mod >> f1 && echo n > new1 && echo n > new2 )
+    out="$( cd "$SC/b" && { sleep 2; printf '\n'; sleep 2; printf 'exit\n'; sleep 0.5; } | LANG=C.UTF-8 script -qec "stty rows 20 cols 90; fish -i" /dev/null 2>/dev/null | tr -d '\r' | strip )"
+    has "$out" 'main.*!1.*\?2' && pass "async result repaints the prompt in a live fish" || fail "async result repaints the prompt in a live fish"
+  fi
+else
+  echo "  skip  fish or git is not installed"
+fi
+
 echo "== menu library (needs a pty; set BOOSH_TEST_PTY=1 on Linux to run)"
 if [ "${BOOSH_TEST_PTY:-0}" = 1 ] && command -v script >/dev/null 2>&1; then
   cat > "$HOME/menu-test.sh" <<EOF

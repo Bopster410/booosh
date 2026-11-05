@@ -35,6 +35,8 @@ parameters), links an editor config, and keeps everything reversible: it validat
 - **Sliders** for font size (8–32, step 0.5) and background opacity (0.3–1, step 0.05).
 - **Presets**: three appearances (`minimal`, `classic`, `borderless`) and two keybind sets (`alt`, `default`).
 - **Editor choice**: `vim` or `nano` (a ready config for each), or none. Adding another editor is one folder.
+- **A small fish prompt of its own**: two lines, git status computed in the background, configured with one command,
+  no plugin manager (see [The prompt](#the-prompt)). Or keep fish's own, or your own plugin.
 - **Cheatsheet**: a markdown table of your keys, generated for exactly the setup you chose.
 - **Packs**: optional terminal setups on top of the base. Included: `git` and `docker`. Each pack only drops files into
   places the tools already read, and `./pack remove` takes them out again.
@@ -61,6 +63,7 @@ Non-interactive examples:
 ./install.sh --yes                                   # last saved choices, else defaults
 ./install.sh --preset borderless --theme nord --font-size 15 --editor nano
 ./install.sh --keys default                          # stock Ghostty keys only
+./install.sh --only prompt                           # just the prompt, leave Ghostty and the editor alone
 ./install.sh --print                                 # show the generated config, write nothing
 ./install.sh --cheatsheet                            # print the keybind cheatsheet
 ./pack add git docker --no-tools                     # packs without installing extra programs
@@ -79,6 +82,7 @@ Non-interactive examples:
 | Cursor style | `block`, `bar`, `underline`, `block_hollow` | live preview |
 | Blinking cursor | yes / no | live preview |
 | Background opacity | 0.3 – 1.0 | slider; needs a compositor |
+| Shell prompt | `boosh`, `default` | `boosh`: the prompt described [below](#the-prompt). `default`: fish's own, nothing is installed. |
 | Default editor | `vim`, `nano`, `none` | links the config and sets `EDITOR` in fish |
 
 The `alt` preset's modifier is not in the menu; use `--mod super` (for example on a Mac) or `--mod ctrl+alt`. See
@@ -105,7 +109,7 @@ search); `Ctrl`+arrows still move by word.
 ```
 $ ./pack list
   docker   available  fish abbreviations for docker and compose (d, dps, dcup, dcl...)
-  git      available  fish abbreviations (gst, gd, gl...), git status in the prompt, safe git defaults
+  git      available  fish abbreviations (gst, gd, gl...), safe git defaults, git status for fish's own prompt
 
 $ ./pack add git          # asks (default: no) before installing lazygit / delta
 $ ./pack status           # health check
@@ -130,10 +134,51 @@ Safety rules built into `pack`:
 - Optional tools are installed with Homebrew if present, otherwise with `apt` when the package exists there;
   otherwise you are told to install it yourself.
 
-Included packs: **git** (abbreviations such as `gst`, `gd`, `gcm`, `gl`, a git status in the fish prompt, and a few
+Included packs: **git** (abbreviations such as `gst`, `gd`, `gcm`, `gl`, git status for fish's own prompt (the boosh prompt has its own), and a few
 safe settings: `init.defaultBranch`, `push.autoSetupRemote`, `fetch.prune`, `rerere.enabled`) and **docker**
 (abbreviations such as `d`, `dps`, `dex`, `dcup`, `dcl`; `docker compose` vs `docker-compose` is detected when you press
 space, so shell startup stays fast).
+
+## The prompt
+
+boosh ships its own small prompt for fish (`fish/prompt/`, a few hundred lines with comments and the settings command). No plugin manager.
+
+```
+~/app main ⇡1 ⇣1 +2 !1 ?3 ✖1 *1 5s
+❯
+```
+
+- **Line 1**: path, git status, and the time of a slow command (3 s or more). **Line 2**: the symbol; after a failed
+  command it turns red and shows the exit code (`✘1 ❯`). An empty line separates each prompt from the previous
+  command's output (not before the very first one).
+- **Git is computed in the background.** One `git status --porcelain=v2` call runs in a separate process, so the prompt
+  never waits for it; the information appears a moment later and the prompt repaints itself. Markers: `⇡ ⇣` commits to
+  push / pull, `+` staged, `!` modified, `?` untracked, `✖` conflicts, `*` stashes. A detached HEAD shows `@abc1234`.
+- **Cost.** In one run here (fish start plus the work before a prompt, small repo / 30 000-file repo) it took 26 / 27 ms,
+  [Hydro](https://github.com/jorgebucaran/hydro) 28 / 30 ms: equal within the noise of that measurement, and it does not
+  grow with the size of the repository. fish's own synchronous git prompt took 36 / 50 ms.
+- **Configure it with one command**, `boosh-prompt` (tab completion included). Changes apply to the next prompt in
+  every open terminal and stay after a restart; a wrong flag changes nothing:
+
+  | Command | What it does |
+  |---|---|
+  | `boosh-prompt` | show the current settings (`*` marks what you changed) |
+  | `--lines 1\|2` | one or two lines |
+  | `--gap N` | empty lines between prompts, 0 to 5 |
+  | `--symbol TEXT` | the last-line character, for example `">"` or `"λ"` |
+  | `--path short\|full` | `~/a/b/c` shortened or in full |
+  | `--git on\|off` | git information; `off` also stops the background job completely |
+  | `--fields LIST` | git parts, comma separated, **in the order you give**: `branch ahead behind staged modified untracked conflicts stash` |
+  | `--time on\|off`, `--time-after 3s` | the time of slow commands, and what "slow" means (`3s` or `3000` ms) |
+  | `--status on\|off` | the exit code (`✘1`) after a failed command |
+  | `--reset` | back to the defaults |
+
+  Flags can be combined: `boosh-prompt --lines 1 --gap 0 --fields branch,modified,untracked`.
+  Settings are the universal variables `boosh_prompt_*`; symbols and colours of the git part are in one function,
+  `__boosh_git_format`.
+- **Install / remove**: `./install.sh --only prompt`, or `--prompt default` to go back to fish's own prompt. If Hydro,
+  Tide or Pure is installed, boosh does not fight over `fish_prompt`: it tells you to remove that plugin first.
+- The technique (result delivered by a signal, then a repaint) is the one Hydro uses; the code is separate.
 
 ## What gets written where
 
@@ -145,6 +190,7 @@ space, so shell startup stays fast).
 | `~/.config/ghostty/cheatsheet.md` | `install.sh` | your cheatsheet |
 | `~/.config/ghostty/.install-choices` | `install.sh` | last answers (the next run's defaults) |
 | `~/.config/fish/conf.d/00-boosh-core.fish` | `install.sh` | `set -gx EDITOR ...` |
+| `~/.config/fish/functions/` (`fish_prompt`, `boosh-prompt`, helpers), `conf.d/boosh_prompt.fish`, `completions/boosh-prompt.fish` | `install.sh` (symlinks) | the boosh prompt |
 | `~/.vimrc` or `~/.nanorc` | `install.sh` (symlink) | editor config |
 | `~/.config/fish/conf.d/pack-<name>.fish` | `pack` (symlink) | abbreviations |
 | `~/.config/git/pack-<name>*.conf` + `include.path` in `~/.gitconfig` | `pack` | git settings |
@@ -174,7 +220,8 @@ Developed and tested on **Ubuntu 24.04, GNOME (Wayland), Ghostty 1.3.1, fish 4.9
   work, but that is also untested.
 - **Windows**: use WSL2 and run everything inside it.
 - The live cursor and the colour previews need a terminal that honours `DECSCUSR` and 24-bit colour; Ghostty does.
-- Fish abbreviations with a cursor marker need fish 3.6 or newer.
+- Fish abbreviations with a cursor marker need fish 3.6 or newer. The prompt uses the `path` builtin (fish 3.5+, by the
+  documentation); it was tested on fish 4.9.3 only.
 - The font glyphs themselves cannot be previewed: a terminal draws all text in one font, so only details are shown.
 - There is no `uninstall` command yet: remove the symlinks listed above and restore the `.bak` files.
 
@@ -186,7 +233,8 @@ BOOSH_TEST_PTY=1 bash tests/smoke.sh      # also drives the arrow-key menu throu
 ```
 
 The suite covers the installer flags and validation, idempotence, `--dry-run`, the cheatsheet, and the whole pack
-lifecycle (including conflicts and the `delta` safeguard). It does not need `ghostty` or `fish`; checks that need them
+lifecycle (including conflicts and the `delta` safeguard), the prompt install and the prompt's git parser (dirty, detached
+HEAD, merge conflict, not a repo), formatting, command time and, with the pty flag, the asynchronous repaint in a live fish. It does not need `ghostty` or `fish`; checks that need them
 are skipped.
 
 ## License
