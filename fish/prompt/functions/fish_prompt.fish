@@ -15,7 +15,9 @@ function fish_prompt
     end
 
     set_color --bold blue; echo -n $__boosh_pwd_text; set_color normal
-    set -l git (__boosh_git_format)
+    # git info comes with the git pack (./pack add git); without it this part is simply absent
+    set -l git
+    functions -q __boosh_git_format; and set git (__boosh_git_format)
     test -n "$git"; and echo -n " $git"
     set -l show_time (__boosh_opt boosh_prompt_show_time true)
     if test "$show_time" != false; and test -n "$__boosh_duration"

@@ -90,8 +90,11 @@ has "$out" "gst +=" && pass "pack show lists abbreviations" || fail "pack show l
 "$ROOT/pack" add git --no-tools >/dev/null 2>&1
 check "git pack links the fish snippet" test -L "$HOME/.config/fish/conf.d/pack-git.fish"
 check "git pack links the git config" test -L "$HOME/.config/git/pack-git.conf"
+check "git pack links its fish functions (the prompt's git part)" bash -c "[ -L '$HOME/.config/fish/functions/__boosh_git_worker.fish' ] && [ -e '$HOME/.config/fish/functions/__boosh_git_format.fish' ] && [ -e '$HOME/.config/fish/functions/__boosh_git_fields.fish' ]"
 check "git include.path is set" bash -c "git config --global --get-all include.path | grep -qx '~/.config/git/pack-git.conf'"
 check "git settings take effect" bash -c "[ \"\$(git config --get push.autosetupremote)\" = true ]"
+check "the new git defaults are active (zdiff3, histogram, version tag order)" bash -c "[ \"\$(git config --get merge.conflictstyle)\" = zdiff3 ] && [ \"\$(git config --get diff.algorithm)\" = histogram ] && [ \"\$(git config --get tag.sort)\" = version:refname ]"
+check "the pack does not touch how pull works" bash -c "! git config --get pull.rebase && ! git config --get pull.ff"
 check "pack status is healthy" "$ROOT/pack" status
 out="$("$ROOT/pack" add git --no-tools 2>&1)"
 has "$out" "ok +include.path" && pass "pack add is idempotent" || fail "pack add is idempotent" "$out"
@@ -106,6 +109,7 @@ check "re-adding switches the delta config off" bash -c "! git config --get core
 
 "$ROOT/pack" remove git >/dev/null 2>&1
 check "remove unlinks the fish snippet" test ! -e "$HOME/.config/fish/conf.d/pack-git.fish"
+check "remove unlinks the fish functions" bash -c "[ ! -e '$HOME/.config/fish/functions/__boosh_git_worker.fish' ] && [ ! -L '$HOME/.config/fish/functions/__boosh_git_worker.fish' ]"
 check "remove drops the include" bash -c "! git config --global --get-all include.path | grep -q pack-git"
 
 # a value the user already set must not be overridden silently
@@ -128,9 +132,67 @@ if command -v fish >/dev/null 2>&1; then
     out="$(fish --no-config -i -c "source '$ROOT/packs/$p/fish.fish'; abbr --show" 2>&1)"
     if [ -n "$out" ] && ! has "$out" "error|Error"; then pass "$p snippet loads and defines abbreviations"; else fail "$p snippet loads and defines abbreviations" "$out"; fi
   done
+  out="$(fish --no-config -i -c "source '$ROOT/packs/git/fish.fish'; abbr --show" 2>&1)"
+  has "$out" "gundo" && has "$out" "gla" && has "$out" "gcam" && pass "git pack: gla, gundo, gcam exist" || fail "git pack: gla, gundo, gcam exist" "$out"
 else
   echo "  skip  fish is not installed"
 fi
+
+echo "== optional part: ./pack add git --tag (gtag; needs fish and git)"
+cleanup; new_home
+"$ROOT/pack" add git --tag --no-tools >/dev/null 2>&1
+check "--tag links gtag and its completions" bash -c "[ -L '$HOME/.config/fish/functions/gtag.fish' ] && [ -L '$HOME/.config/fish/completions/gtag.fish' ]"
+out="$("$ROOT/pack" show git)"
+has "$out" "--tag \[installed\]" && has "$out" "functions/gtag.fish" && has "$out" "completions/gtag.fish" && pass "pack show lists the part, its functions and completions" || fail "pack show lists the part, its functions and completions" "$out"
+has "$("$ROOT/pack" list)" "part --tag \(installed\)" && pass "pack list shows the part as installed" || fail "pack list shows the part as installed"
+"$ROOT/pack" add git --no-tools >/dev/null 2>&1
+check "a plain re-add of the pack keeps the part" test -L "$HOME/.config/fish/functions/gtag.fish"
+out="$("$ROOT/pack" status 2>&1)"; has "$out" "ok +git" && ! has "$out" WARN && pass "pack status is clean with the part installed" || fail "pack status is clean with the part installed" "$out"
+out="$("$ROOT/pack" add git --bogus 2>&1)"; has "$out" "has no part" && pass "an unknown --part is rejected" || fail "an unknown --part is rejected" "$out"
+out="$("$ROOT/pack" add docker --tag 2>&1)"; has "$out" "docker.*has no part" && [ ! -e "$HOME/.config/fish/conf.d/pack-docker.fish" ] && pass "a part the pack does not have changes nothing" || fail "a part the pack does not have changes nothing" "$out"
+if command -v fish >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
+  GT="$T/gtag-repo"; mkdir -p "$GT"
+  gtg() { GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t fish --no-config -c 'source $argv[1]; cd $argv[2]; eval $argv[3]' "$ROOT/packs/git/extras/tag/functions/gtag.fish" "$GT" "$1" 2>&1; }
+  ( cd "$GT" && git init -q -b main . && git -c user.name=t -c user.email=t@t commit -q --allow-empty -m one \
+      && for t in v1.2.0 v1.4.2 v1.10.0 v1.12.0-rc1 nightly; do git tag $t; done ) >/dev/null 2>&1
+  has "$(gtg gtag)" '^v1.10.0' && pass "gtag: lists the newest version first, 1.10 after 1.9" || fail "gtag: lists the newest version first" "$(gtg gtag)"
+  gtg 'gtag patch -y' >/dev/null; check "gtag patch: v1.10.0 -> v1.10.1 (rc and other names ignored)" git -C "$GT" rev-parse -q --verify refs/tags/v1.10.1
+  check "gtag makes an annotated tag" bash -c "[ \"\$(git -C '$GT' cat-file -t v1.10.1)\" = tag ]"
+  gtg 'gtag minor -y' >/dev/null; check "gtag minor: v1.10.1 -> v1.11.0" git -C "$GT" rev-parse -q --verify refs/tags/v1.11.0
+  gtg 'gtag major -y -m "big one"' >/dev/null; check "gtag major: v1.11.0 -> v2.0.0" git -C "$GT" rev-parse -q --verify refs/tags/v2.0.0
+  check "gtag -m sets the message" bash -c "git -C '$GT' tag -n1 v2.0.0 | grep -q 'big one'"
+  out="$(gtg 'echo n | gtag patch')"; has "$out" "nothing created" && ! git -C "$GT" rev-parse -q --verify refs/tags/v2.0.1 >/dev/null && pass "gtag: answering no creates nothing" || fail "gtag: answering no creates nothing" "$out"
+  out="$(gtg 'echo y | gtag patch')"; check "gtag: answering y creates the tag" git -C "$GT" rev-parse -q --verify refs/tags/v2.0.1
+  out="$(gtg 'gtag sideways; echo rc=$status')"; has "$out" "rc=2" && pass "gtag rejects an unknown word" || fail "gtag rejects an unknown word" "$out"
+  mkdir -p "$T/gtag-plain" && ( cd "$T/gtag-plain" && git init -q -b main . && git -c user.name=t -c user.email=t@t commit -q --allow-empty -m one && git tag 1.0.0 ) >/dev/null 2>&1
+  GT="$T/gtag-plain"; gtg 'gtag minor -y' >/dev/null; check "gtag keeps a repository's no-prefix style (1.0.0 -> 1.1.0)" git -C "$GT" rev-parse -q --verify refs/tags/1.1.0
+  mkdir -p "$T/gtag-empty" && ( cd "$T/gtag-empty" && git init -q -b main . && git -c user.name=t -c user.email=t@t commit -q --allow-empty -m one ) >/dev/null 2>&1
+  GT="$T/gtag-empty"; gtg 'gtag patch -y' >/dev/null; check "gtag: the first tag in a repository without versions is v0.0.1" git -C "$GT" rev-parse -q --verify refs/tags/v0.0.1
+  mkdir -p "$T/gtag-nogit"; GT="$T/gtag-nogit"; out="$(gtg 'gtag patch -y; echo rc=$status')"; has "$out" "not inside a git repository" && has "$out" "rc=1" && pass "gtag outside a repository says so" || fail "gtag outside a repository says so" "$out"
+  out="$(fish --no-config -c 'source $argv[1]; source $argv[2]; complete -C "gtag "' "$ROOT/packs/git/extras/tag/functions/gtag.fish" "$ROOT/packs/git/extras/tag/completions/gtag.fish" 2>&1)"
+  has "$out" "^major" && has "$out" "^patch" && pass "gtag tab completion offers major/minor/patch" || fail "gtag tab completion" "$out"
+else
+  echo "  skip  fish or git is not installed"
+fi
+if command -v fish >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
+  GS="$T/gsync"; mkdir -p "$GS"; gq() { git -c user.name=t -c user.email=t@t -c init.defaultBranch=main "$@"; }
+  ( cd "$GS" && gq init -q --bare origin.git && gq clone -q origin.git a && gq clone -q origin.git b \
+    && cd a && echo 1 > f && gq add f && gq commit -qm one && gq push -q -u origin main \
+    && cd ../b && gq pull -q && cd ../a && echo 2 >> f && gq commit -qam two && gq push -q && cd ../b ) >/dev/null 2>&1
+  gsy() { fish --no-config -c 'source $argv[1]; cd $argv[2]; gsync' "$ROOT/packs/git/functions/gsync.fish" "$1" 2>&1; }
+  gsy "$GS/b" >/dev/null; [ "$(git -C "$GS/b" rev-list --count HEAD)" = 2 ] && pass "gsync: fetches and fast-forwards the current branch" || fail "gsync: fetches and fast-forwards the current branch"
+  ( cd "$GS/b" && echo local >> f && gq commit -qam local && cd ../a && echo 3 >> f && gq commit -qam three && gq push -q ) >/dev/null 2>&1
+  before="$(git -C "$GS/b" rev-parse HEAD)"; out="$(gsy "$GS/b")"
+  [ "$(git -C "$GS/b" rev-parse HEAD)" = "$before" ] && pass "gsync: diverged history stops and changes nothing" || fail "gsync: diverged history stops and changes nothing" "$out"
+  mkdir -p "$T/gsync-none"; has "$(gsy "$T/gsync-none")" "not inside a git repository" && pass "gsync outside a repository says so" || fail "gsync outside a repository says so"
+fi
+"$ROOT/pack" remove git --tag >/dev/null 2>&1
+check "remove --tag unlinks gtag and the completion" bash -c "[ ! -L '$HOME/.config/fish/functions/gtag.fish' ] && [ ! -L '$HOME/.config/fish/completions/gtag.fish' ]"
+check "...but the rest of the git pack stays" bash -c "[ -L '$HOME/.config/fish/conf.d/pack-git.fish' ] && [ -L '$HOME/.config/fish/functions/gsync.fish' ]"
+"$ROOT/pack" add git --no-tools >/dev/null 2>&1
+check "a plain re-add does not bring a removed part back" test ! -e "$HOME/.config/fish/functions/gtag.fish"
+"$ROOT/pack" add git --tag --no-tools >/dev/null 2>&1; "$ROOT/pack" remove git >/dev/null 2>&1
+check "removing the whole pack removes its parts too" bash -c "[ ! -L '$HOME/.config/fish/functions/gtag.fish' ] && [ ! -L '$HOME/.config/fish/conf.d/pack-git.fish' ] && ! grep -q 'gtag' '$XDG_DATA_HOME/booosh/manifest' 2>/dev/null"
 
 echo "== core (stable install, generations, check, rollback, uninstall)"
 cleanup; new_home
@@ -209,7 +271,7 @@ echo "== prompt (install side)"
 cleanup; new_home
 "$ROOT/install.sh" --yes --no-cheatsheet >/dev/null 2>&1
 FD="$HOME/.config/fish"
-check "prompt files are linked by default" bash -c "[ -L '$FD/functions/fish_prompt.fish' ] && [ -L '$FD/conf.d/boosh_prompt.fish' ] && [ -L '$FD/functions/__boosh_git_worker.fish' ]"
+check "prompt files are linked by default" bash -c "[ -L '$FD/functions/fish_prompt.fish' ] && [ -L '$FD/conf.d/boosh_prompt.fish' ] && [ ! -e '$FD/functions/__boosh_git_worker.fish' ]"
 "$ROOT/install.sh" --yes --no-cheatsheet --prompt default >/dev/null 2>&1
 check "--prompt default removes only our links" bash -c "[ ! -e '$FD/functions/fish_prompt.fish' ] && [ ! -e '$FD/conf.d/boosh_prompt.fish' ] && [ -e '$FD/conf.d/00-boosh-core.fish' ]"
 before="$(find "$HOME" \( -type f -o -type l \) | sort)"
@@ -231,7 +293,7 @@ done
 
 echo "== prompt (behaviour; needs fish and git)"
 if command -v fish >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
-  P="$ROOT/fish/prompt"
+  P="$ROOT/packs/git"   # the git part of the prompt lives in the git pack
   g() { git -c user.name=t -c user.email=t@t -c init.defaultBranch=main "$@"; }
   SC="$T/scenario"; mkdir -p "$SC"
   ( cd "$SC" && g init -q --bare -b main origin.git && g clone -q origin.git a 2>/dev/null
@@ -257,6 +319,11 @@ if command -v fish >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
   strip() { sed -E 's/\x1b\][^\x07\x1b]*(\x07|\x1b\\)//g; s/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\(B//g'; }
   "$ROOT/install.sh" --yes --only prompt --prompt default >/dev/null 2>&1; rm -f "$FD/functions/fish_prompt.fish.bak"
   "$ROOT/install.sh" --yes --only prompt --prompt boosh >/dev/null 2>&1
+  out="$(fish -i -c 'boosh-prompt --git off; boosh-prompt --fields all; echo rc=$status' 2>&1 | strip)"
+  has "$out" "git pack" && has "$out" "rc=2" && pass "without the git pack, boosh-prompt --git/--fields explain what to do" || fail "without the git pack, boosh-prompt --git/--fields explain what to do" "$out"
+  out="$(fish -i -c 'true; fish_prompt' 2>&1 | strip)"
+  has "$out" '❯' && ! has "$out" 'nknown command|rror' && pass "without the git pack, the prompt works and shows no git part" || fail "without the git pack, the prompt works and shows no git part" "$out"
+  "$ROOT/pack" add git --no-tools >/dev/null 2>&1
   out="$(fish -i -c 'set -g __boosh_git_data main 2 1 3 4 5 1 2; __boosh_git_format' 2>&1 | strip)"
   [ "$out" = "main ⇡2 ⇣1 +3 !4 ?5 ✖1 *2" ] && pass "format: all counters" || fail "format: all counters" "$out"
   out="$(fish -i -c 'set -g __boosh_git_data main 0 0 0 0 0 0 0; __boosh_git_format' 2>&1 | strip)"
