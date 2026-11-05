@@ -44,6 +44,8 @@ die() { echo "error: $*" >&2; exit 1; }
 
 # shellcheck source=lib/menu.sh
 . "$SRC/lib/menu.sh"
+# shellcheck source=lib/state.sh
+. "$SRC/lib/state.sh"
 
 editor_get() { sed -n "s/^$2=//p" "$SRC/editors/$1/editor.conf" | head -n 1; }
 
@@ -65,6 +67,8 @@ menu_desc() { # menu_desc VAR OPTION
     BLINK:no)          echo "the cursor stays steady" ;;
     LIGATURES:yes)     echo "pairs like != -> => become one joined shape (the font must support it)" ;;
     LIGATURES:no)      echo "every character is drawn separately" ;;
+    DO_IMPORT:yes)     echo "your settings keep applying on top of boosh's; a .bak copy is kept too" ;;
+    DO_IMPORT:no)      echo "only boosh's choices; your old config is kept as a .bak copy" ;;
     PROMPT:boosh)      echo "two lines, git status computed in the background, no plugin" ;;
     PROMPT:default)    echo "fish's own prompt, nothing is installed" ;;
     EDITOR_NAME:none)  echo "do not install an editor config" ;;
@@ -405,6 +409,12 @@ Behaviour
   --ask               force the menu even when stdin is not a terminal
   --cheatsheet        print the keybind cheatsheet (markdown) and exit (writes nothing)
   --no-cheatsheet     do not write ~/.config/ghostty/cheatsheet.md during install
+  --import-config yes|no  if you already have a Ghostty config: keep it as your overrides (local.conf, loaded
+                      last) instead of only backing it up (default: yes without a terminal, asked in the menu)
+  --check             health check of what boosh installed (broken links, edited files, repository ahead)
+  --generations       list the installed generations (every install keeps a snapshot)
+  --rollback          go back to the previous generation
+  --uninstall         remove what boosh installed and restore your backed-up files
   --print             print the generated Ghostty config and exit (writes nothing)
   --dry-run           show what would be done, write nothing
   --list              show presets, themes and defaults
@@ -423,7 +433,7 @@ dflt() {
 }
 
 for v in $VARS; do printf -v "$v" '%s' ''; done
-DRY=0; PRINT=0; ASK=0; YES=0; LIST=0; CHOSEN=0; CHEAT=0; NOCHEAT=0; ONLY=""
+DRY=0; PRINT=0; ASK=0; YES=0; LIST=0; CHOSEN=0; CHEAT=0; NOCHEAT=0; ONLY=""; MODE=""; IMPORT_CONFIG=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -443,6 +453,11 @@ while [ $# -gt 0 ]; do
     --ask)     ASK=1; shift ;;
     --prompt)  PROMPT="${2:?--prompt needs a value}";       CHOSEN=1; shift 2 ;;
     --only)    ONLY="${2:?--only needs a value}"; shift 2 ;;
+    --check)       MODE=check; shift ;;
+    --generations) MODE=generations; shift ;;
+    --rollback)    MODE=rollback; shift ;;
+    --uninstall)   MODE=uninstall; shift ;;
+    --import-config) IMPORT_CONFIG="${2:?--import-config needs yes or no}"; shift 2 ;;
     --editor)  EDITOR_NAME="${2:?--editor needs a value}"; CHOSEN=1; shift 2 ;;
     --no-vim)  EDITOR_NAME=none; CHOSEN=1; shift ;;
     --cheatsheet)    CHEAT=1; shift ;;
@@ -464,6 +479,148 @@ want() { # want STEP
 for _o in $(echo "$ONLY" | tr ',' ' '); do
   case "$_o" in ghostty|editor|prompt) ;; *) die "--only: unknown part '$_o' (ghostty, editor, prompt)" ;; esac
 done
+
+# ─── file helpers (used by every mode below) ─────────────
+next_backup() { # next_backup PATH -> a free PATH.bak[.N]
+  local b="$1.bak" n=1
+  while [ -e "$b" ] || [ -L "$b" ]; do b="$1.bak.$n"; n=$((n + 1)); done
+  echo "$b"
+}
+
+backup() { # backup PATH: move it aside (an older backup is never overwritten) and remember it
+  local dst="$1" b
+  b="$(next_backup "$dst")"
+  if [ "$DRY" = 1 ]; then echo "would back up $dst -> $b"; else mv "$dst" "$b"; echo "backup  $dst -> $b"; mf_add backup "$dst" "$b"; fi
+}
+
+link() { # link TARGET LIVE [TAG]: LIVE becomes a symlink to TARGET (TAG for --check: core, repo, packs)
+  local target="$1" live="$2" tag="${3:-repo}" cur=""
+  if [ -L "$live" ] && [ "$(readlink "$live")" = "$target" ]; then
+    echo "ok      $live"; [ "$DRY" = 1 ] || mf_add link "$live" "$target" "$tag"; return 0
+  fi
+  [ ! -L "$live" ] || cur="$(readlink "$live")"
+  case "$cur" in
+    "$SRC"/*|"$BOOSH_HOME"/*)   # a link boosh made earlier (into the repository, or an older generation): replace it
+      if [ "$DRY" = 1 ]; then echo "would relink $live -> $target"; return 0; fi
+      rm "$live" ;;
+  esac
+  if [ -e "$live" ] || [ -L "$live" ]; then backup "$live"; fi
+  if [ "$DRY" = 1 ]; then echo "would link $live -> $target"; return 0; fi
+  mkdir -p "$(dirname "$live")"
+  ln -s "$target" "$live"; echo "link    $live -> $target"; mf_add link "$live" "$target" "$tag"
+}
+
+# ─── modes that look at or undo an installation ──────────
+mode_generations() {
+  local cur id any=0
+  cur="$(gen_current)"
+  echo "generations in $BH_GENS (* = current):"
+  for id in $(gen_list); do
+    any=1; printf '  %s %s\n' "$([ "$id" = "$cur" ] && echo '*' || echo ' ')" "$id"
+  done
+  [ "$any" = 1 ] || echo "  none yet: run ./install.sh"
+}
+
+prune_dead_links() { # after a rollback: links into the core whose file does not exist in that generation
+  local owner kind live target extra
+  [ -f "$BH_MANIFEST" ] || return 0
+  while IFS=$'\t' read -r owner kind live target extra; do
+    [ "$kind" = link ] && [ "$extra" = core ] || continue
+    if [ -L "$live" ] && [ ! -e "$live" ]; then rm -f "$live"; mf_drop_live "$live"; echo "removed $live (not part of that generation)"; fi
+  done < "$BH_MANIFEST"
+}
+
+mode_rollback() {
+  local cur prev="" id
+  cur="$(gen_current)"
+  [ -n "$cur" ] || die "nothing is installed yet (no core in $BOOSH_HOME)"
+  for id in $(gen_list); do [ "$id" = "$cur" ] && break; prev="$id"; done
+  [ -n "$prev" ] || die "there is no generation older than $cur (see: ./install.sh --generations)"
+  if [ "$DRY" = 1 ]; then echo "would roll back: core $cur -> $prev"; return 0; fi
+  ln -sfn "generations/$prev" "$BH_CORE"
+  echo "core    $cur -> $prev"
+  if [ -f "$BH_CORE/ghostty/config" ] && [ -f "$GH/config" ] && grep -q "^$MARKER" "$GH/config"; then
+    cp "$BH_CORE/ghostty/config" "$GH/config.tmp.$$" && mv -f "$GH/config.tmp.$$" "$GH/config" && chmod 644 "$GH/config"
+    mf_set_sum "$GH/config" "$(sum_of "$GH/config")"
+    echo "wrote   $GH/config (the one of $prev)"
+  fi
+  prune_dead_links
+  echo "done. Reload Ghostty (ctrl+shift+,) and open a new fish session."
+}
+
+mode_check() {
+  local bad=0 warn=0 owner kind live target extra cur now
+  cur="$(gen_current)"
+  if [ -z "$cur" ]; then echo "FAIL    no installed core at $BH_CORE: run ./install.sh"; return 1; fi
+  echo "core    $cur ($(gen_list | wc -l | tr -d ' ') generation(s) kept) in $BOOSH_HOME"
+  [ -d "$BH_CORE/" ] || { echo "FAIL    $BH_CORE does not resolve to a directory"; bad=$((bad + 1)); }
+  if [ ! -f "$BH_MANIFEST" ]; then echo "note    no manifest yet"; else
+    while IFS=$'\t' read -r owner kind live target extra; do
+      case "$kind" in
+        link)
+          if [ ! -L "$live" ]; then echo "FAIL    $live is missing or no longer a symlink ($owner)"; bad=$((bad + 1))
+          elif [ "$(readlink "$live")" != "$target" ]; then echo "WARN    $live now points to $(readlink "$live"), boosh set $target"; warn=$((warn + 1))
+          elif [ ! -e "$live" ]; then echo "FAIL    $live is a BROKEN link -> $target"; bad=$((bad + 1))
+          elif [ "$extra" = repo ]; then echo "WARN    $live points into the repository: switching branches or moving it can break this (not protected by the core)"; warn=$((warn + 1))
+          else echo "ok      $live"; fi ;;
+        file)
+          if [ ! -f "$live" ]; then echo "FAIL    $live is missing ($owner)"; bad=$((bad + 1))
+          else
+            now="$(sum_of "$live")"
+            if [ "$now" != "$target" ]; then echo "WARN    $live was edited after boosh wrote it; the next install rewrites it"; warn=$((warn + 1))
+            else echo "ok      $live"; fi
+          fi ;;
+        user) [ -f "$live" ] && echo "ok      $live (yours)" || echo "note    $live (yours) does not exist" ;;
+      esac
+    done < "$BH_MANIFEST"
+  fi
+  if [ -d "$SRC/fish/prompt" ] && [ -d "$BH_CORE/fish/prompt" ] && ! diff -rq "$SRC/fish/prompt" "$BH_CORE/fish/prompt" >/dev/null 2>&1; then
+    echo "WARN    the repository's prompt differs from the installed one: run ./install.sh --only prompt to apply it"; warn=$((warn + 1))
+  fi
+  echo "result  $bad problem(s), $warn warning(s)"
+  [ "$bad" -eq 0 ]
+}
+
+mode_uninstall() {
+  local owner kind live target extra
+  [ -f "$BH_MANIFEST" ] || die "nothing to uninstall: no manifest in $BOOSH_HOME"
+  # 1. take away what boosh put there (a file you changed is kept)
+  while IFS=$'\t' read -r owner kind live target extra; do
+    case "$owner" in install:*) ;; *) continue ;; esac
+    case "$kind" in
+      link) if [ -L "$live" ]; then [ "$DRY" = 1 ] && echo "would remove $live" || { rm "$live"; echo "removed $live"; }; fi ;;
+      file|user)
+        if [ -f "$live" ] && [ "$(sum_of "$live")" = "$target" ]; then
+          [ "$DRY" = 1 ] && echo "would remove $live" || { rm "$live"; echo "removed $live"; }
+        elif [ -f "$live" ]; then echo "keep    $live (you changed it)"; fi ;;
+    esac
+  done < "$BH_MANIFEST"
+  # 2. put your originals back where the path is free again
+  while IFS=$'\t' read -r owner kind live target extra; do
+    case "$owner" in install:*) ;; *) continue ;; esac
+    [ "$kind" = backup ] || continue
+    if [ ! -e "$live" ] && [ ! -L "$live" ] && { [ -e "$target" ] || [ -L "$target" ]; }; then
+      [ "$DRY" = 1 ] && echo "would restore $live from $target" || { mv "$target" "$live"; echo "restored $live (from $target)"; }
+    fi
+  done < "$BH_MANIFEST"
+  [ "$DRY" = 1 ] && return 0
+  for owner in $(mf_owners_like install:); do mf_forget "$owner"; done
+  rm -f "$GH/.install-choices" "$GH/cheatsheet.md"
+  if [ -z "$(mf_owners_like pack:)" ]; then
+    rm -rf "$BH_CORE" "$BH_GENS" "$BH_MANIFEST"; rmdir "$BH_PACKS" "$BOOSH_HOME" 2>/dev/null || true
+    echo "removed the core and all generations"
+  else
+    rm -rf "$BH_CORE" "$BH_GENS"; echo "removed the core and all generations (installed packs stay: ./pack remove NAME)"
+  fi
+  echo "done."
+}
+
+case "$MODE" in
+  generations) mode_generations; exit 0 ;;
+  rollback)    mode_rollback; exit 0 ;;
+  check)       mode_check; exit $? ;;
+  uninstall)   mode_uninstall; exit 0 ;;
+esac
 
 if [ "$LIST" = 1 ]; then
   echo "appearance presets: $PRESETS"
@@ -631,6 +788,7 @@ re_ok()   { [[ "$1" =~ $2 ]]; }
 in_list "$PRESET" "$PRESETS" || die "preset '$PRESET' unknown; one of: $PRESETS"
 in_list "$KEYS" "$KEYSETS"   || die "keys '$KEYS' unknown; one of: $KEYSETS"
 in_list "$CURSOR" "$CURSORS" || die "cursor '$CURSOR' unknown; one of: $CURSORS"
+case "$IMPORT_CONFIG" in ""|yes|no) ;; *) die "--import-config must be yes or no (got '$IMPORT_CONFIG')" ;; esac
 in_list "$PROMPT" "$PROMPTS" || die "prompt '$PROMPT' unknown; one of: $PROMPTS"
 in_list "$EDITOR_NAME" "$EDITORS" || die "editor '$EDITOR_NAME' unknown; one of: $EDITORS"
 re_ok "$MOD" '^(ctrl|alt|super)(\+(ctrl|alt|super))*$' \
@@ -664,7 +822,8 @@ render() {
   echo
   sed "s/@MOD@/$MOD/g" "$SRC/ghostty/keys/$KEYS.conf"
   echo
-  echo "# ─── per-machine overrides (optional) ────────────────────"
+  echo "# ─── per-OS defaults (from the stable core), then yours: both optional, yours wins ───"
+  echo "config-file = ?$BH_CORE/ghostty/os.conf"
   echo "config-file = ?local.conf"
 }
 
@@ -729,79 +888,163 @@ if [ "$PRINT" = 1 ]; then render; exit 0; fi
 if [ "$CHEAT" = 1 ]; then build_cheatsheet; exit 0; fi
 
 # ─── install ─────────────────────────────────────────────
-backup() { # backup PATH  (never overwrites an older backup)
-  local dst="$1" b n=1
-  b="$dst.bak"
-  while [ -e "$b" ] || [ -L "$b" ]; do b="$dst.bak.$n"; n=$((n + 1)); done
-  if [ "$DRY" = 1 ]; then echo "would back up $dst -> $b"; else mv "$dst" "$b"; echo "backup  $dst -> $b"; fi
+# 1. decide, 2. build a complete snapshot (a "generation") in a staging folder, 3. validate it, 4. only then make it the
+# current one and touch live files. A mistake stops before step 4 and nothing on your machine has changed.
+STAGE=""
+VDIR=""
+cleanup() { [ -z "$STAGE" ] || rm -rf "$STAGE"; [ -z "$VDIR" ] || rm -rf "$VDIR"; }
+trap cleanup EXIT
+
+# another prompt plugin already owns fish_prompt: do not fight it silently
+prompt_conflict() {
+  local fdir="$HOME/.config/fish"
+  [ ! -e "$fdir/conf.d/hydro.fish" ] || { echo "Hydro (remove it with: fisher remove jorgebucaran/hydro)"; return 0; }
+  [ ! -e "$fdir/conf.d/_tide_init.fish" ] || { echo "Tide (see: fisher list, then fisher remove <its name>)"; return 0; }
+  ls "$fdir"/functions/_pure_* >/dev/null 2>&1 && echo "Pure (see: fisher list, then fisher remove <its name>)"
+  return 0
 }
+PROMPT_BLOCK=""
+if want prompt && [ "$PROMPT" = boosh ]; then PROMPT_BLOCK="$(prompt_conflict)"; fi
 
-link() { # link SOURCE TARGET
-  local src="$1" dst="$2"
-  if [ -L "$dst" ] && [ "$(readlink "$dst")" = "$src" ]; then echo "ok      $dst"; return 0; fi
-  if [ -e "$dst" ] || [ -L "$dst" ]; then backup "$dst"; fi
-  if [ "$DRY" = 1 ]; then echo "would link $dst -> $src"; return 0; fi
-  mkdir -p "$(dirname "$dst")"
-  ln -s "$src" "$dst"; echo "link    $dst -> $src"
+# your own Ghostty config: keep it as local.conf (loaded last) or only back it up
+OLD_CFG=""; LOCAL_SRC=""; DO_IMPORT=no
+decide_import() {
+  want ghostty || return 0
+  local lc="$GH/local.conf"
+  if [ -f "$GH/config" ] && [ ! -L "$GH/config" ] && ! grep -q "^$MARKER" "$GH/config"; then OLD_CFG="$GH/config"; fi
+  if [ -f "$lc" ] && [ ! -L "$lc" ] && [ -s "$lc" ]; then LOCAL_SRC="$lc"; return 0; fi   # you already have overrides: keep them
+  [ -n "$OLD_CFG" ] || return 0
+  case "$IMPORT_CONFIG" in
+    yes|no) DO_IMPORT="$IMPORT_CONFIG" ;;
+    "")
+      DO_IMPORT=yes
+      if [ "$YES" = 0 ] && [ "$DRY" = 0 ] && menu_ok; then
+        select_menu DO_IMPORT "Your current Ghostty config is about to be replaced. Keep it as your overrides (local.conf)?" yes yes no
+      fi ;;
+    *) die "--import-config must be yes or no" ;;
+  esac
+  [ "$DO_IMPORT" != yes ] || LOCAL_SRC="$OLD_CFG"
 }
+decide_import
 
-if want ghostty; then
-TMP="$(mktemp "${TMPDIR:-/tmp}/ghostty-config.XXXXXX")"
-trap 'rm -f "$TMP"' EXIT
-render > "$TMP"
+# 2. the snapshot
+if [ "$DRY" = 1 ]; then STAGE="$(mktemp -d "${TMPDIR:-/tmp}/boosh-stage.XXXXXX")"
+else mkdir -p "$BH_GENS" "$BH_PACKS"; STAGE="$(mktemp -d "$BOOSH_HOME/.stage.XXXXXX")"; fi
 
-# supporting files first, so validation sees the same world Ghostty will
-link "$SRC/ghostty/local.$OS.conf" "$GH/local.conf"
-if [ "$OS" = linux ] && [ "$PRESET" = minimal ]; then
-  link "$SRC/ghostty/gtk.css" "$GH/gtk.css"
-fi
-
-if command -v ghostty >/dev/null 2>&1; then
-  if ! out="$(ghostty +validate-config --config-file="$TMP" 2>&1)"; then
-    echo "$out" >&2
-    die "generated config is invalid (see above); nothing was written. Try --print to inspect it."
+build_stage() {
+  # start from the generation that is current now, so a partial run (--only prompt) never loses the other parts
+  if [ -n "$(gen_current)" ] && [ -d "$BH_CORE/" ]; then cp -R "$BH_CORE/." "$STAGE/"; fi
+  mkdir -p "$STAGE/ghostty" "$STAGE/fish"
+  if want prompt && [ -z "$PROMPT_BLOCK" ]; then
+    rm -rf "$STAGE/fish/prompt"
+    if [ "$PROMPT" = boosh ]; then mkdir -p "$STAGE/fish/prompt"; cp -R "$SRC/fish/prompt/." "$STAGE/fish/prompt/"; fi
   fi
-  echo "valid   generated config passes ghostty +validate-config"
+  if want ghostty; then
+    cp "$SRC/ghostty/local.$OS.conf" "$STAGE/ghostty/os.conf"
+    rm -f "$STAGE/ghostty/gtk.css"
+    if [ "$OS" = linux ] && [ "$PRESET" = minimal ]; then cp "$SRC/ghostty/gtk.css" "$STAGE/ghostty/gtk.css"; fi
+    render > "$STAGE/ghostty/config"
+  fi
+}
+build_stage
+
+# 3. validate before anything is touched
+validate_stage() {
+  local f out
+  if want prompt && [ -d "$STAGE/fish/prompt" ] && command -v fish >/dev/null 2>&1; then
+    for f in "$STAGE"/fish/prompt/*/*.fish; do
+      if ! out="$(fish --no-execute "$f" 2>&1)"; then
+        echo "$out" >&2; die "$(basename "$f") has a syntax error (see above); nothing was changed."
+      fi
+    done
+    echo "valid   prompt files pass fish --no-execute"
+  fi
+  if want ghostty; then
+    if command -v ghostty >/dev/null 2>&1; then
+      VDIR="$(mktemp -d "${TMPDIR:-/tmp}/boosh-validate.XXXXXX")"
+      sed "s|$BH_CORE/ghostty/os.conf|$STAGE/ghostty/os.conf|g" "$STAGE/ghostty/config" > "$VDIR/config"
+      [ -z "$LOCAL_SRC" ] || cp "$LOCAL_SRC" "$VDIR/local.conf"
+      if ! out="$(ghostty +validate-config --config-file="$VDIR/config" 2>&1)"; then
+        echo "$out" >&2
+        [ "$DO_IMPORT" != yes ] || echo "hint    the error may come from your old config being imported; try: ./install.sh --import-config no" >&2
+        die "the Ghostty config (with your local.conf) is invalid (see above); nothing was changed. Try --print to inspect it."
+      fi
+      echo "valid   the Ghostty config$([ -n "$LOCAL_SRC" ] && echo ' with your local.conf') passes ghostty +validate-config"
+    else
+      echo "note    ghostty is not installed here, skipping its validation"
+    fi
+  fi
+}
+validate_stage
+
+# 4. make it current, then the live files
+PROMPT_FILES=()
+if want prompt && [ "$PROMPT" = boosh ] && [ -z "$PROMPT_BLOCK" ]; then
+  for f in "$STAGE"/fish/prompt/*/*.fish; do PROMPT_FILES[${#PROMPT_FILES[@]}]="$(basename "$(dirname "$f")")/$(basename "$f")"; done
+fi
+
+if [ "$DRY" = 1 ]; then
+  echo "would add a generation to $BH_GENS and make it the current core"
 else
-  echo "note    ghostty not installed here, skipping validation"
+  GEN_ID="$(gen_new_id)"
+  gen_commit "$STAGE" "$GEN_ID"; STAGE=""
+  echo "core    $GEN_ID ($BH_CORE)"
+  gen_prune
 fi
 
-dst="$GH/config"
-if [ -L "$dst" ]; then
-  if [ "$DRY" = 1 ]; then echo "would remove old symlink $dst"; else rm "$dst"; echo "removed old symlink $dst"; fi
-elif [ -e "$dst" ] && ! grep -q "^$MARKER" "$dst"; then
-  backup "$dst"
-fi
-if [ -f "$dst" ] && cmp -s "$TMP" "$dst"; then
-  echo "ok      $dst (unchanged)"
-elif [ "$DRY" = 1 ]; then
-  echo "would write $dst"
-else
-  mkdir -p "$GH"; cp "$TMP" "$dst"; chmod 644 "$dst"; echo "wrote   $dst"
-fi
-
-if [ "$DRY" = 0 ]; then
-  {
-    for v in $VARS; do printf '%s=%s\n' "$v" "${!v}"; done
-  } > "$CHOICES"
-fi
-
-if [ "$NOCHEAT" = 0 ]; then
+apply_ghostty_live() {
+  local cfg="$GH/config" lc="$GH/local.conf" b
+  MF_NEW=()
+  mkdir -p "$GH"
+  [ ! -L "$cfg" ] || { [ "$DRY" = 1 ] && echo "would remove old symlink $cfg" || { rm "$cfg"; echo "removed old symlink $cfg"; }; }
+  if [ -n "$OLD_CFG" ]; then   # your own config: always keep a copy, optionally carry it over as local.conf
+    b="$(next_backup "$cfg")"
+    if [ "$DRY" = 1 ]; then echo "would back up $cfg -> $b"; else cp -p "$cfg" "$b"; echo "backup  $cfg -> $b"; mf_add backup "$cfg" "$b"; fi
+  fi
+  # an older boosh linked local.conf into the repository: from now on it is a file that belongs to you
+  [ ! -L "$lc" ] || { [ "$DRY" = 1 ] && echo "would replace the link $lc by a file of yours" || rm -f "$lc"; }
+  if [ "$DO_IMPORT" = yes ] && [ -n "$OLD_CFG" ] && { [ ! -e "$lc" ] || [ ! -s "$lc" ]; }; then
+    if [ "$DRY" = 1 ]; then echo "would keep your old config as $lc"; else cp -p "$OLD_CFG" "$lc"; echo "import  your old config -> $lc (loaded last: it keeps applying on top)"; mf_add user "$lc" "$(sum_of "$lc")"; fi
+  elif [ ! -e "$lc" ]; then
+    if [ "$DRY" = 1 ]; then echo "would create $lc for your overrides"; else
+      printf '%s\n' "# Your own Ghostty overrides. boosh never overwrites this file; it is loaded last, so anything here wins." > "$lc"
+      echo "created $lc (yours)"; mf_add user "$lc" "$(sum_of "$lc")"
+    fi
+  fi
+  # the generated config: written next to the target first, then moved in
   if [ "$DRY" = 1 ]; then
-    echo "would write $GH/cheatsheet.md"
+    echo "would write $cfg"
+  elif [ -f "$cfg" ] && cmp -s "$BH_CORE/ghostty/config" "$cfg"; then
+    echo "ok      $cfg (unchanged)"; mf_add file "$cfg" "$(sum_of "$cfg")"
   else
-    build_cheatsheet > "$GH/cheatsheet.md"; echo "wrote   $GH/cheatsheet.md"
+    cp "$BH_CORE/ghostty/config" "$cfg.tmp.$$" && mv -f "$cfg.tmp.$$" "$cfg"; chmod 644 "$cfg"
+    echo "wrote   $cfg"; mf_add file "$cfg" "$(sum_of "$cfg")"
   fi
-fi
-fi   # want ghostty
+  # the title-bar style sheet (Linux, minimal preset)
+  if [ "$OS" = linux ] && [ "$PRESET" = minimal ]; then link "$BH_CORE/ghostty/gtk.css" "$GH/gtk.css" core
+  elif [ -L "$GH/gtk.css" ]; then
+    case "$(readlink "$GH/gtk.css")" in "$BOOSH_HOME"/*|"$SRC"/*) [ "$DRY" = 1 ] || { rm -f "$GH/gtk.css"; echo "removed $GH/gtk.css (not used by this preset)"; } ;; esac
+  fi
+  if [ "$DRY" = 0 ]; then
+    { for v in $VARS; do printf '%s=%s\n' "$v" "${!v}"; done; } > "$CHOICES"
+    mf_commit install:ghostty
+  fi
+  if [ "$NOCHEAT" = 0 ]; then
+    if [ "$DRY" = 1 ]; then echo "would write $GH/cheatsheet.md"
+    else build_cheatsheet > "$GH/cheatsheet.md"; echo "wrote   $GH/cheatsheet.md"; fi
+  fi
+}
+if want ghostty; then apply_ghostty_live; fi
 
-# ─── editor: link its config, set EDITOR in fish ─────────
+# ─── editor: link its config, set EDITOR in fish (unchanged: still links into the repository) ─
 install_editor() {
   local snippet="$HOME/.config/fish/conf.d/00-boosh-core.fish"
+  MF_NEW=()
   if [ "$EDITOR_NAME" = none ]; then
     if [ -f "$snippet" ] && grep -q "^$MARKER" "$snippet"; then
       if [ "$DRY" = 1 ]; then echo "would remove $snippet"; else rm "$snippet"; echo "removed $snippet"; fi
     fi
+    [ "$DRY" = 1 ] || mf_forget install:editor
     return 0
   fi
   local file target cmd
@@ -809,7 +1052,7 @@ install_editor() {
   target="$(editor_get "$EDITOR_NAME" TARGET)"
   cmd="$(editor_get "$EDITOR_NAME" COMMAND)"
   [ -n "$file" ] && [ -n "$target" ] && [ -n "$cmd" ] || die "editors/$EDITOR_NAME/editor.conf needs COMMAND, FILE and TARGET"
-  link "$SRC/editors/$EDITOR_NAME/$file" "$HOME/$target"
+  link "$SRC/editors/$EDITOR_NAME/$file" "$HOME/$target" repo
   local want
   want="$(printf '%s. Do not edit: re-run install.sh.\nset -gx EDITOR %s\n' "$MARKER" "$cmd")"
   if [ -f "$snippet" ] && [ "$(cat "$snippet")" = "$want" ]; then
@@ -819,37 +1062,37 @@ install_editor() {
   else
     mkdir -p "$(dirname "$snippet")"; printf '%s\n' "$want" > "$snippet"; echo "wrote   $snippet (EDITOR=$cmd)"
   fi
+  [ "$DRY" = 1 ] || { [ -f "$snippet" ] && mf_add file "$snippet" "$(sum_of "$snippet")"; mf_commit install:editor; }
   command -v "$cmd" >/dev/null 2>&1 || echo "note    $cmd is not installed on this machine"
 }
 if want editor; then install_editor; fi
 
-# ─── prompt: link the boosh prompt into fish (no plugin manager) ─
-install_prompt() {
-  local fdir="$HOME/.config/fish" sub f dst other=""
+# ─── prompt: the boosh prompt (no plugin manager); live files are links into the stable core ─
+apply_prompt_live() {
+  local fdir="$HOME/.config/fish" sub f dst rel
+  MF_NEW=()
   if [ "$PROMPT" = default ]; then   # take our links out again; fish falls back to its own prompt
     for sub in functions conf.d completions; do
       for f in "$SRC"/fish/prompt/$sub/*.fish; do
         dst="$fdir/$sub/$(basename "$f")"
-        if [ -L "$dst" ] && [ "$(readlink "$dst")" = "$f" ]; then
-          if [ "$DRY" = 1 ]; then echo "would remove $dst"; else rm "$dst"; echo "removed $dst"; fi
+        if [ -L "$dst" ]; then
+          case "$(readlink "$dst")" in "$BOOSH_HOME"/*|"$SRC"/fish/prompt/*)
+            if [ "$DRY" = 1 ]; then echo "would remove $dst"; else rm "$dst"; echo "removed $dst"; fi ;;
+          esac
         fi
       done
     done
+    [ "$DRY" = 1 ] || mf_forget install:prompt
     return 0
   fi
-  # another prompt plugin already owns fish_prompt: do not fight it silently
-  [ ! -e "$fdir/conf.d/hydro.fish" ] || other="Hydro (remove it with: fisher remove jorgebucaran/hydro)"
-  [ ! -e "$fdir/conf.d/_tide_init.fish" ] || other="Tide (see: fisher list, then fisher remove <its name>)"
-  ls "$fdir"/functions/_pure_* >/dev/null 2>&1 && other="Pure (see: fisher list, then fisher remove <its name>)"
-  if [ -n "$other" ]; then
-    echo "skip    prompt: $other is installed. Remove it first, then run: ./install.sh --only prompt"
+  if [ -n "$PROMPT_BLOCK" ]; then
+    echo "skip    prompt: $PROMPT_BLOCK is installed. Remove it first, then run: ./install.sh --only prompt"
     return 0
   fi
-  for sub in functions conf.d completions; do
-    for f in "$SRC"/fish/prompt/$sub/*.fish; do link "$f" "$fdir/$sub/$(basename "$f")"; done
-  done
+  for rel in "${PROMPT_FILES[@]}"; do link "$BH_CORE/fish/prompt/$rel" "$fdir/$rel" core; done
+  [ "$DRY" = 1 ] || mf_commit install:prompt
 }
-if want prompt; then install_prompt; fi
+if want prompt; then apply_prompt_live; fi
 
 echo
 if want ghostty; then
@@ -858,4 +1101,5 @@ if want ghostty; then
 else
   echo "done ($ONLY). Open a new fish session (or run: exec fish) to see the changes."
 fi
+echo "Health check: ./install.sh --check    Undo the last install: ./install.sh --rollback"
 echo "Optional terminal setups for specific work (git, docker, ...): ./pack list"
