@@ -58,6 +58,11 @@ mf_forget() { # mf_forget OWNER
   MF_NEW=(); mf_commit "$1"
 }
 
+mf_owner_of() { # mf_owner_of LIVE -> the owner that has a link/file entry for this path (nothing if none)
+  [ -f "$BH_MANIFEST" ] && awk -F'\t' -v l="$1" '($2 == "link" || $2 == "file") && $3 == l { print $1; exit }' "$BH_MANIFEST"
+  return 0
+}
+
 mf_owners_like() { # mf_owners_like PREFIX -> owners that start with PREFIX
   [ -f "$BH_MANIFEST" ] && awk -F'\t' -v p="$1" 'index($1, p) == 1 { print $1 }' "$BH_MANIFEST" | sort -u
 }

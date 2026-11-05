@@ -14,12 +14,17 @@ check() { # check "name" command...   (passes when the command succeeds)
 }
 has() { grep -qE -- "$2" <<< "$1"; }   # has "$text" "regex"
 
+# packs come from a catalog; tests use a tiny fixture one (the real packs live in the booosh-packs repository and are
+# tested there), so nothing here needs the network
+FIXTURE_CATALOG="$ROOT/tests/fixtures/catalog"
+export BOOSH_CATALOG="$FIXTURE_CATALOG"
+
 new_home() { T="$(mktemp -d "${TMPDIR:-/tmp}/boosh-test.XXXXXX")"; export HOME="$T" XDG_CONFIG_HOME="$T/.config" XDG_DATA_HOME="$T/.local/share"; unset GIT_CONFIG_GLOBAL; }
-cleanup() { [ -z "${T:-}" ] || rm -rf "$T"; }
+cleanup() { [ -z "${T:-}" ] || rm -rf "$T" 2>/dev/null || { sleep 1; rm -rf "$T" 2>/dev/null; } || true; }
 trap cleanup EXIT
 
 echo "== syntax"
-for f in install.sh pack bootstrap.sh lib/menu.sh tests/smoke.sh; do check "bash -n $f" bash -n "$ROOT/$f"; done
+for f in install.sh pack bootstrap.sh lib/menu.sh lib/state.sh lib/source.sh tests/smoke.sh; do check "bash -n $f" bash -n "$ROOT/$f"; done
 
 echo "== install.sh"
 new_home
@@ -90,11 +95,9 @@ has "$out" "gst +=" && pass "pack show lists abbreviations" || fail "pack show l
 "$ROOT/pack" add git --no-tools >/dev/null 2>&1
 check "git pack links the fish snippet" test -L "$HOME/.config/fish/conf.d/pack-git.fish"
 check "git pack links the git config" test -L "$HOME/.config/git/pack-git.conf"
-check "git pack links its fish functions (the prompt's git part)" bash -c "[ -L '$HOME/.config/fish/functions/__boosh_git_worker.fish' ] && [ -e '$HOME/.config/fish/functions/__boosh_git_format.fish' ] && [ -e '$HOME/.config/fish/functions/__boosh_git_fields.fish' ]"
+check "a pack links its fish functions" test -L "$HOME/.config/fish/functions/demo_fn.fish"
 check "git include.path is set" bash -c "git config --global --get-all include.path | grep -qx '~/.config/git/pack-git.conf'"
 check "git settings take effect" bash -c "[ \"\$(git config --get push.autosetupremote)\" = true ]"
-check "the new git defaults are active (zdiff3, histogram, version tag order)" bash -c "[ \"\$(git config --get merge.conflictstyle)\" = zdiff3 ] && [ \"\$(git config --get diff.algorithm)\" = histogram ] && [ \"\$(git config --get tag.sort)\" = version:refname ]"
-check "the pack does not touch how pull works" bash -c "! git config --get pull.rebase && ! git config --get pull.ff"
 check "pack status is healthy" "$ROOT/pack" status
 out="$("$ROOT/pack" add git --no-tools 2>&1)"
 has "$out" "ok +include.path" && pass "pack add is idempotent" || fail "pack add is idempotent" "$out"
@@ -109,7 +112,7 @@ check "re-adding switches the delta config off" bash -c "! git config --get core
 
 "$ROOT/pack" remove git >/dev/null 2>&1
 check "remove unlinks the fish snippet" test ! -e "$HOME/.config/fish/conf.d/pack-git.fish"
-check "remove unlinks the fish functions" bash -c "[ ! -e '$HOME/.config/fish/functions/__boosh_git_worker.fish' ] && [ ! -L '$HOME/.config/fish/functions/__boosh_git_worker.fish' ]"
+check "remove unlinks the fish functions" bash -c "[ ! -e '$HOME/.config/fish/functions/demo_fn.fish' ] && [ ! -L '$HOME/.config/fish/functions/demo_fn.fish' ]"
 check "remove drops the include" bash -c "! git config --global --get-all include.path | grep -q pack-git"
 
 # a value the user already set must not be overridden silently
@@ -126,73 +129,125 @@ rm -f "$HOME/.config/fish/conf.d/pack-docker.fish"; mkdir -p "$HOME/.config/fish
 check "an existing file is backed up" test -f "$HOME/.config/fish/conf.d/pack-docker.fish.bak"
 check "docker pack links its snippet" test -L "$HOME/.config/fish/conf.d/pack-docker.fish"
 
-echo "== fish snippets"
-if command -v fish >/dev/null 2>&1; then
-  for p in git docker; do
-    out="$(fish --no-config -i -c "source '$ROOT/packs/$p/fish.fish'; abbr --show" 2>&1)"
-    if [ -n "$out" ] && ! has "$out" "error|Error"; then pass "$p snippet loads and defines abbreviations"; else fail "$p snippet loads and defines abbreviations" "$out"; fi
-  done
-  out="$(fish --no-config -i -c "source '$ROOT/packs/git/fish.fish'; abbr --show" 2>&1)"
-  has "$out" "gundo" && has "$out" "gla" && has "$out" "gcam" && pass "git pack: gla, gundo, gcam exist" || fail "git pack: gla, gundo, gcam exist" "$out"
-else
-  echo "  skip  fish is not installed"
-fi
-
-echo "== optional part: ./pack add git --tag (gtag; needs fish and git)"
+echo "== optional parts: ./pack add git --tag"
 cleanup; new_home
 "$ROOT/pack" add git --tag --no-tools >/dev/null 2>&1
-check "--tag links gtag and its completions" bash -c "[ -L '$HOME/.config/fish/functions/gtag.fish' ] && [ -L '$HOME/.config/fish/completions/gtag.fish' ]"
+check "--tag links the part's functions and completions" bash -c "[ -L '$HOME/.config/fish/functions/demo_tag.fish' ] && [ -L '$HOME/.config/fish/completions/demo_tag.fish' ]"
 out="$("$ROOT/pack" show git)"
-has "$out" "--tag \[installed\]" && has "$out" "functions/gtag.fish" && has "$out" "completions/gtag.fish" && pass "pack show lists the part, its functions and completions" || fail "pack show lists the part, its functions and completions" "$out"
+has "$out" "--tag \[installed\]" && has "$out" "functions/demo_tag.fish" && has "$out" "completions/demo_tag.fish" && pass "pack show lists the part, its functions and completions" || fail "pack show lists the part, its functions and completions" "$out"
 has "$("$ROOT/pack" list)" "part --tag \(installed\)" && pass "pack list shows the part as installed" || fail "pack list shows the part as installed"
 "$ROOT/pack" add git --no-tools >/dev/null 2>&1
-check "a plain re-add of the pack keeps the part" test -L "$HOME/.config/fish/functions/gtag.fish"
+check "a plain re-add of the pack keeps the part" test -L "$HOME/.config/fish/functions/demo_tag.fish"
 out="$("$ROOT/pack" status 2>&1)"; has "$out" "ok +git" && ! has "$out" WARN && pass "pack status is clean with the part installed" || fail "pack status is clean with the part installed" "$out"
 out="$("$ROOT/pack" add git --bogus 2>&1)"; has "$out" "has no part" && pass "an unknown --part is rejected" || fail "an unknown --part is rejected" "$out"
 out="$("$ROOT/pack" add docker --tag 2>&1)"; has "$out" "docker.*has no part" && [ ! -e "$HOME/.config/fish/conf.d/pack-docker.fish" ] && pass "a part the pack does not have changes nothing" || fail "a part the pack does not have changes nothing" "$out"
-if command -v fish >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
-  GT="$T/gtag-repo"; mkdir -p "$GT"
-  gtg() { GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t fish --no-config -c 'source $argv[1]; cd $argv[2]; eval $argv[3]' "$ROOT/packs/git/extras/tag/functions/gtag.fish" "$GT" "$1" 2>&1; }
-  ( cd "$GT" && git init -q -b main . && git -c user.name=t -c user.email=t@t commit -q --allow-empty -m one \
-      && for t in v1.2.0 v1.4.2 v1.10.0 v1.12.0-rc1 nightly; do git tag $t; done ) >/dev/null 2>&1
-  has "$(gtg gtag)" '^v1.10.0' && pass "gtag: lists the newest version first, 1.10 after 1.9" || fail "gtag: lists the newest version first" "$(gtg gtag)"
-  gtg 'gtag patch -y' >/dev/null; check "gtag patch: v1.10.0 -> v1.10.1 (rc and other names ignored)" git -C "$GT" rev-parse -q --verify refs/tags/v1.10.1
-  check "gtag makes an annotated tag" bash -c "[ \"\$(git -C '$GT' cat-file -t v1.10.1)\" = tag ]"
-  gtg 'gtag minor -y' >/dev/null; check "gtag minor: v1.10.1 -> v1.11.0" git -C "$GT" rev-parse -q --verify refs/tags/v1.11.0
-  gtg 'gtag major -y -m "big one"' >/dev/null; check "gtag major: v1.11.0 -> v2.0.0" git -C "$GT" rev-parse -q --verify refs/tags/v2.0.0
-  check "gtag -m sets the message" bash -c "git -C '$GT' tag -n1 v2.0.0 | grep -q 'big one'"
-  out="$(gtg 'echo n | gtag patch')"; has "$out" "nothing created" && ! git -C "$GT" rev-parse -q --verify refs/tags/v2.0.1 >/dev/null && pass "gtag: answering no creates nothing" || fail "gtag: answering no creates nothing" "$out"
-  out="$(gtg 'echo y | gtag patch')"; check "gtag: answering y creates the tag" git -C "$GT" rev-parse -q --verify refs/tags/v2.0.1
-  out="$(gtg 'gtag sideways; echo rc=$status')"; has "$out" "rc=2" && pass "gtag rejects an unknown word" || fail "gtag rejects an unknown word" "$out"
-  mkdir -p "$T/gtag-plain" && ( cd "$T/gtag-plain" && git init -q -b main . && git -c user.name=t -c user.email=t@t commit -q --allow-empty -m one && git tag 1.0.0 ) >/dev/null 2>&1
-  GT="$T/gtag-plain"; gtg 'gtag minor -y' >/dev/null; check "gtag keeps a repository's no-prefix style (1.0.0 -> 1.1.0)" git -C "$GT" rev-parse -q --verify refs/tags/1.1.0
-  mkdir -p "$T/gtag-empty" && ( cd "$T/gtag-empty" && git init -q -b main . && git -c user.name=t -c user.email=t@t commit -q --allow-empty -m one ) >/dev/null 2>&1
-  GT="$T/gtag-empty"; gtg 'gtag patch -y' >/dev/null; check "gtag: the first tag in a repository without versions is v0.0.1" git -C "$GT" rev-parse -q --verify refs/tags/v0.0.1
-  mkdir -p "$T/gtag-nogit"; GT="$T/gtag-nogit"; out="$(gtg 'gtag patch -y; echo rc=$status')"; has "$out" "not inside a git repository" && has "$out" "rc=1" && pass "gtag outside a repository says so" || fail "gtag outside a repository says so" "$out"
-  out="$(fish --no-config -c 'source $argv[1]; source $argv[2]; complete -C "gtag "' "$ROOT/packs/git/extras/tag/functions/gtag.fish" "$ROOT/packs/git/extras/tag/completions/gtag.fish" 2>&1)"
-  has "$out" "^major" && has "$out" "^patch" && pass "gtag tab completion offers major/minor/patch" || fail "gtag tab completion" "$out"
-else
-  echo "  skip  fish or git is not installed"
-fi
-if command -v fish >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
-  GS="$T/gsync"; mkdir -p "$GS"; gq() { git -c user.name=t -c user.email=t@t -c init.defaultBranch=main "$@"; }
-  ( cd "$GS" && gq init -q --bare origin.git && gq clone -q origin.git a && gq clone -q origin.git b \
-    && cd a && echo 1 > f && gq add f && gq commit -qm one && gq push -q -u origin main \
-    && cd ../b && gq pull -q && cd ../a && echo 2 >> f && gq commit -qam two && gq push -q && cd ../b ) >/dev/null 2>&1
-  gsy() { fish --no-config -c 'source $argv[1]; cd $argv[2]; gsync' "$ROOT/packs/git/functions/gsync.fish" "$1" 2>&1; }
-  gsy "$GS/b" >/dev/null; [ "$(git -C "$GS/b" rev-list --count HEAD)" = 2 ] && pass "gsync: fetches and fast-forwards the current branch" || fail "gsync: fetches and fast-forwards the current branch"
-  ( cd "$GS/b" && echo local >> f && gq commit -qam local && cd ../a && echo 3 >> f && gq commit -qam three && gq push -q ) >/dev/null 2>&1
-  before="$(git -C "$GS/b" rev-parse HEAD)"; out="$(gsy "$GS/b")"
-  [ "$(git -C "$GS/b" rev-parse HEAD)" = "$before" ] && pass "gsync: diverged history stops and changes nothing" || fail "gsync: diverged history stops and changes nothing" "$out"
-  mkdir -p "$T/gsync-none"; has "$(gsy "$T/gsync-none")" "not inside a git repository" && pass "gsync outside a repository says so" || fail "gsync outside a repository says so"
-fi
 "$ROOT/pack" remove git --tag >/dev/null 2>&1
-check "remove --tag unlinks gtag and the completion" bash -c "[ ! -L '$HOME/.config/fish/functions/gtag.fish' ] && [ ! -L '$HOME/.config/fish/completions/gtag.fish' ]"
-check "...but the rest of the git pack stays" bash -c "[ -L '$HOME/.config/fish/conf.d/pack-git.fish' ] && [ -L '$HOME/.config/fish/functions/gsync.fish' ]"
+check "remove --tag unlinks the part and its completion" bash -c "[ ! -L '$HOME/.config/fish/functions/demo_tag.fish' ] && [ ! -L '$HOME/.config/fish/completions/demo_tag.fish' ]"
+check "...but the rest of the pack stays" bash -c "[ -L '$HOME/.config/fish/conf.d/pack-git.fish' ] && [ -L '$HOME/.config/fish/functions/demo_fn.fish' ]"
 "$ROOT/pack" add git --no-tools >/dev/null 2>&1
-check "a plain re-add does not bring a removed part back" test ! -e "$HOME/.config/fish/functions/gtag.fish"
+check "a plain re-add does not bring a removed part back" test ! -e "$HOME/.config/fish/functions/demo_tag.fish"
 "$ROOT/pack" add git --tag --no-tools >/dev/null 2>&1; "$ROOT/pack" remove git >/dev/null 2>&1
-check "removing the whole pack removes its parts too" bash -c "[ ! -L '$HOME/.config/fish/functions/gtag.fish' ] && [ ! -L '$HOME/.config/fish/conf.d/pack-git.fish' ] && ! grep -q 'gtag' '$XDG_DATA_HOME/booosh/manifest' 2>/dev/null"
+check "removing the whole pack removes its parts too" bash -c "[ ! -L '$HOME/.config/fish/functions/demo_tag.fish' ] && [ ! -L '$HOME/.config/fish/conf.d/pack-git.fish' ] && ! grep -q 'demo_tag' '$XDG_DATA_HOME/booosh/manifest' 2>/dev/null"
+
+echo "== pack sources: catalog, GitHub (fisher style), folders"
+cleanup; new_home
+SRCT="$T/srcs"; mkdir -p "$SRCT"
+# a catalog: one folder per pack
+mkdir -p "$SRCT/cat/hello/functions" "$SRCT/cat/future"
+printf 'DESCRIPTION=says hello\nAPI=1\n' > "$SRCT/cat/hello/pack.conf"
+printf 'if status is-interactive\n    abbr -a hi "echo hello"\nend\n' > "$SRCT/cat/hello/fish.fish"
+printf 'function hello_fn\n    echo hello v1\nend\n' > "$SRCT/cat/hello/functions/hello_fn.fish"
+printf 'DESCRIPTION=needs a newer boosh\nAPI=99\n' > "$SRCT/cat/future/pack.conf"
+# a fisher-style plugin (no pack.conf): conf.d with install/uninstall events, functions, completions, a theme
+mkdir -p "$SRCT/fz.fish/conf.d" "$SRCT/fz.fish/functions" "$SRCT/fz.fish/completions" "$SRCT/fz.fish/themes"
+cat > "$SRCT/fz.fish/conf.d/fz.fish" <<'FZ'
+function _fz_install --on-event fz_install
+    echo installed >$FZ_MARK
+end
+function _fz_update --on-event fz_update
+    echo updated >$FZ_MARK
+end
+function _fz_uninstall --on-event fz_uninstall
+    echo uninstalled >$FZ_MARK
+end
+FZ
+printf 'function fzfn\n    echo fz\nend\n' > "$SRCT/fz.fish/functions/fzfn.fish"
+printf 'complete -c fzfn -f\n' > "$SRCT/fz.fish/completions/fzfn.fish"
+printf 'fish_color_normal normal\n' > "$SRCT/fz.fish/themes/mine.theme"
+export BOOSH_CATALOG="$SRCT/cat"
+FD="$HOME/.config/fish"
+
+out="$("$ROOT/pack" list --remote 2>&1)"
+has "$out" "hello +available +says hello" && has "$out" "catalog: $SRCT/cat" && pass "list --remote shows the catalog" || fail "list --remote shows the catalog" "$out"
+"$ROOT/pack" add hello >/dev/null 2>&1
+check "a catalog pack is installed (downloaded, then snapshotted)" bash -c "[ -L '$FD/conf.d/pack-hello.fish' ] && [ -L '$FD/functions/hello_fn.fish' ] && [ -f '$XDG_DATA_HOME/booosh/packs/hello/pack.conf' ]"
+check "its provenance is recorded" bash -c "grep -q '^kind=catalog' '$XDG_DATA_HOME/booosh/packs/hello/.source'"
+printf 'function hello_fn\n    echo hello v2\nend\n' > "$SRCT/cat/hello/functions/hello_fn.fish"
+"$ROOT/pack" update hello >/dev/null 2>&1
+check "update fetches again and re-applies" grep -q "hello v2" "$FD/functions/hello_fn.fish"
+out="$("$ROOT/pack" add future 2>&1)"; has "$out" "needs a newer boosh" && [ ! -e "$FD/conf.d/pack-future.fish" ] && pass "a pack with a newer API is refused" || fail "a pack with a newer API is refused" "$out"
+out="$("$ROOT/pack" add nosuchpack 2>&1)"; has "$out" "not in the catalog" && pass "an unknown pack name says so" || fail "an unknown pack name says so" "$out"
+"$ROOT/pack" remove hello >/dev/null 2>&1
+check "removing a catalog pack removes its files" bash -c "[ ! -e '$FD/conf.d/pack-hello.fish' ] && [ ! -L '$FD/functions/hello_fn.fish' ] && [ ! -e '$XDG_DATA_HOME/booosh/packs/hello' ]"
+
+echo "== pack sources: third-party plugins"
+out="$("$ROOT/pack" show "$SRCT/fz.fish" 2>&1)"
+has "$out" "fz-fish" && has "$out" "themes/mine.theme" && [ ! -e "$FD/conf.d/fz.fish" ] && pass "show previews a source without installing it" || fail "show previews a source without installing it" "$out"
+out="$("$ROOT/pack" add "$SRCT/fz.fish" </dev/null 2>&1)"; rc=$?
+has "$out" "code from outside boosh" && has "$out" "cancelled" && [ ! -e "$FD/conf.d/fz.fish" ] && pass "third-party code is shown and needs a yes (nothing without it)" || fail "third-party code is shown and needs a yes" "$out"
+if command -v fish >/dev/null 2>&1; then
+  export FZ_MARK="$T/fz.mark"
+  "$ROOT/pack" add "$SRCT/fz.fish" --yes >/dev/null 2>&1
+  check "a fisher-layout plugin is linked (conf.d, functions, completions, themes)" bash -c "[ -L '$FD/conf.d/fz.fish' ] && [ -L '$FD/functions/fzfn.fish' ] && [ -L '$FD/completions/fzfn.fish' ] && [ -L '$FD/themes/mine.theme' ]"
+  [ "$(cat "$FZ_MARK" 2>/dev/null)" = installed ] && pass "the plugin's fz_install event is emitted, like fisher does" || fail "the plugin's fz_install event is emitted" "$(cat "$FZ_MARK" 2>/dev/null)"
+  "$ROOT/pack" update fz-fish >/dev/null 2>&1
+  [ "$(cat "$FZ_MARK" 2>/dev/null)" = updated ] && pass "update emits fz_update" || fail "update emits fz_update"
+  mkdir -p "$SRCT/other/functions"; printf 'function fzfn\n    echo other\nend\n' > "$SRCT/other/functions/fzfn.fish"
+  out="$("$ROOT/pack" add "$SRCT/other" --yes 2>&1)"
+  has "$out" "already belong to something else" && has "$out" "pack:fz-fish" && [ ! -e "$FD/functions/fzfn.fish.bak" ] && pass "two packs cannot fight over one file (nothing changed)" || fail "two packs cannot fight over one file" "$out"
+  "$ROOT/install.sh" --yes --no-cheatsheet --editor none --only prompt --prompt boosh >/dev/null 2>&1
+  mkdir -p "$SRCT/hydra/functions"; printf 'function fish_prompt\n    echo hydra\nend\n' > "$SRCT/hydra/functions/fish_prompt.fish"
+  out="$("$ROOT/pack" add "$SRCT/hydra" --yes 2>&1)"
+  has "$out" "belongs to install:prompt" && pass "a plugin cannot take over the boosh prompt silently" || fail "a plugin cannot take over the boosh prompt silently" "$out"
+  "$ROOT/pack" remove fz-fish >/dev/null 2>&1
+  [ "$(cat "$FZ_MARK" 2>/dev/null)" = uninstalled ] && pass "remove emits fz_uninstall" || fail "remove emits fz_uninstall" "$(cat "$FZ_MARK" 2>/dev/null)"
+  check "removing a plugin removes every file it linked" bash -c "[ ! -L '$FD/conf.d/fz.fish' ] && [ ! -L '$FD/functions/fzfn.fish' ] && [ ! -L '$FD/completions/fzfn.fish' ] && [ ! -L '$FD/themes/mine.theme' ]"
+  unset FZ_MARK
+else
+  echo "  skip  fish is not installed (plugin events)"
+fi
+mkdir -p "$SRCT/sym/functions"; ln -s /etc/passwd "$SRCT/sym/functions/x.fish"
+out="$("$ROOT/pack" add "$SRCT/sym" --yes 2>&1)"; has "$out" "symbolic links" && pass "a source with symbolic links is refused" || fail "a source with symbolic links is refused" "$out"
+mkdir -p "$SRCT/empty"; echo hi > "$SRCT/empty/README"
+out="$("$ROOT/pack" add "$SRCT/empty" --yes 2>&1)"; has "$out" "nothing to install" && pass "a folder that is no plugin is refused" || fail "a folder that is no plugin is refused" "$out"
+out="$("$ROOT/pack" add http://example.com/x.tar.gz --yes 2>&1)"; has "$out" "http:// is not allowed" && pass "plain http is refused" || fail "plain http is refused" "$out"
+mkdir -p "$SRCT/hello/functions"; printf 'function h2\nend\n' > "$SRCT/hello/functions/h2.fish"
+out="$("$ROOT/pack" add "$SRCT/hello" --yes 2>&1)"; has "$out" "belongs to a pack of boosh" && pass "a third party cannot take the name of a catalog pack" || fail "a third party cannot take the name of a catalog pack" "$out"
+
+echo "== pack sources: GitHub download (fake curl, no network)"
+FB="$SRCT/fakebin"; mkdir -p "$FB" "$SRCT/tar/fz.fish-abc123"
+cp -R "$SRCT/fz.fish/." "$SRCT/tar/fz.fish-abc123/"
+( cd "$SRCT/tar" && tar -czf "$SRCT/fz.tgz" fz.fish-abc123 )
+cat > "$FB/curl" <<'CURL'
+#!/bin/sh
+# fake curl: remember the URL, "download" a prepared archive into the file given with -o
+out=""; url=""
+while [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift ;; -*) ;; *) url="$1" ;; esac; shift; done
+echo "$url" >> "$FAKE_CURL_LOG"
+cp "$FAKE_ARCHIVE" "$out"
+CURL
+chmod +x "$FB/curl"
+export FAKE_CURL_LOG="$SRCT/curl.log" FAKE_ARCHIVE="$SRCT/fz.tgz"; : > "$FAKE_CURL_LOG"
+out="$(PATH="$FB:$PATH" "$ROOT/pack" add Bopster410/fz.fish@v1 --yes 2>&1)"
+has "$(cat "$FAKE_CURL_LOG")" '^https://codeload.github.com/Bopster410/fz.fish/tar.gz/v1$' && pass "OWNER/REPO@REF downloads the GitHub archive of that ref" || fail "OWNER/REPO@REF downloads the GitHub archive of that ref" "$(cat "$FAKE_CURL_LOG") | $out"
+check "...and installs it under the repository's name" bash -c "[ -L '$FD/conf.d/fz.fish' ] && grep -q '^archive_sha256=[0-9a-f]\{16,\}' '$XDG_DATA_HOME/booosh/packs/fz-fish/.source' && grep -q '^source=Bopster410/fz.fish@v1' '$XDG_DATA_HOME/booosh/packs/fz-fish/.source'"
+out="$(PATH="$FB:$PATH" "$ROOT/pack" add github:someone/fz.fish --yes 2>&1)"; has "$out" "already installed from" && pass "the same name from another source is refused" || fail "the same name from another source is refused" "$out"
+: > "$FAKE_CURL_LOG"; PATH="$FB:$PATH" "$ROOT/pack" update fz-fish >/dev/null 2>&1
+has "$(cat "$FAKE_CURL_LOG")" 'fz.fish/tar.gz/v1' && pass "update downloads the recorded source again" || fail "update downloads the recorded source again"
+"$ROOT/pack" remove fz-fish >/dev/null 2>&1
+out="$("$ROOT/pack" add notarepo/ --yes 2>&1)"; has "$out" "not a GitHub source|could not get" && pass "a malformed source is refused" || fail "a malformed source is refused" "$out"
+out="$("$ROOT/pack" status 2>&1)"; has "$out" "no packs installed|ok " && ! has "$out" WARN && pass "pack status is clean after all of this" || fail "pack status is clean after all of this" "$out"
+unset FAKE_CURL_LOG FAKE_ARCHIVE; export BOOSH_CATALOG="$FIXTURE_CATALOG"
 
 echo "== core (stable install, generations, check, rollback, uninstall)"
 cleanup; new_home
@@ -291,31 +346,9 @@ for bad in "--prompt nope" "--only nonsense"; do
   if "$ROOT/install.sh" --yes --dry-run $bad >/dev/null 2>&1; then fail "rejects $bad"; else pass "rejects $bad"; fi
 done
 
-echo "== prompt (behaviour; needs fish and git)"
-if command -v fish >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
-  P="$ROOT/packs/git"   # the git part of the prompt lives in the git pack
-  g() { git -c user.name=t -c user.email=t@t -c init.defaultBranch=main "$@"; }
-  SC="$T/scenario"; mkdir -p "$SC"
-  ( cd "$SC" && g init -q --bare -b main origin.git && g clone -q origin.git a 2>/dev/null
-    cd a && g checkout -q -b main 2>/dev/null; echo 1 > f1; echo 1 > f2; echo base > c.txt; g add -A; g commit -qm one; g push -q -u origin main 2>/dev/null
-    cd "$SC" && g clone -q origin.git b 2>/dev/null
-    ( cd a && echo 2 >> f1 && g commit -qam two && g push -q origin main )
-    cd b && echo local > f3 && g add f3 && g commit -qm local && g fetch -q && echo s > stashme && g add stashme && g stash -q \
-      && echo staged > f4 && g add f4 && echo mod >> f2 && echo u1 > u1 && echo u2 > u2 ) >/dev/null 2>&1
-  worker() { # worker NAME -> "branch ahead behind staged modified untracked conflicted stash"
-    local out="$SC/out.$1"; rm -f "$out"
-    fish --no-config -c 'source $argv[1]; __boosh_git_worker $argv[2] $argv[3] 999999' "$P/functions/__boosh_git_worker.fish" "$SC/b" "$out" </dev/null >/dev/null 2>&1
-    sed 1d "$out" 2>/dev/null | tr '\n' ' ' | sed 's/ $//'
-  }
-  [ "$(worker dirty)" = "main 1 1 1 1 2 0 1" ] && pass "worker: ahead, behind, staged, modified, untracked, stash" || fail "worker: ahead, behind, staged, modified, untracked, stash" "$(worker dirty)"
-  ( cd "$SC/b" && g stash drop -q; g reset -q --hard origin/main; g clean -qfd; g checkout -q --detach HEAD ) >/dev/null 2>&1
-  has "$(worker detached)" '^@[0-9a-f]{7} 0 0 0 0 0 0 0$' && pass "worker: detached HEAD shows @sha" || fail "worker: detached HEAD shows @sha" "$(worker detached)"
-  ( cd "$SC/b" && g checkout -q main && echo B2 > c.txt && g commit -qam B2 && cd ../a && echo A2 > c.txt && g commit -qam A2 && g push -q origin main && cd ../b && g fetch -q && g merge origin/main ) >/dev/null 2>&1
-  [ "$(worker conflict)" = "main 1 1 0 0 0 1 0" ] && pass "worker: merge conflict counted" || fail "worker: merge conflict counted" "$(worker conflict)"
-  ( cd "$SC/b" && g merge --abort ) >/dev/null 2>&1
-  out="$(fish --no-config -c 'source $argv[1]; __boosh_git_worker /tmp $argv[2] 999999' "$P/functions/__boosh_git_worker.fish" "$SC/out.nogit" </dev/null 2>&1; test -f "$SC/out.nogit" && echo WROTE || echo nothing)"
-  [ "$out" = nothing ] && pass "worker: a directory that is not a repo writes nothing" || fail "worker: a directory that is not a repo writes nothing"
-
+echo "== prompt (behaviour; needs fish)"
+if command -v fish >/dev/null 2>&1; then
+  # the git part of the prompt comes with the git pack and is tested in the packs repository; here: the prompt itself
   strip() { sed -E 's/\x1b\][^\x07\x1b]*(\x07|\x1b\\)//g; s/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\(B//g'; }
   "$ROOT/install.sh" --yes --only prompt --prompt default >/dev/null 2>&1; rm -f "$FD/functions/fish_prompt.fish.bak"
   "$ROOT/install.sh" --yes --only prompt --prompt boosh >/dev/null 2>&1
@@ -323,11 +356,10 @@ if command -v fish >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
   has "$out" "git pack" && has "$out" "rc=2" && pass "without the git pack, boosh-prompt --git/--fields explain what to do" || fail "without the git pack, boosh-prompt --git/--fields explain what to do" "$out"
   out="$(fish -i -c 'true; fish_prompt' 2>&1 | strip)"
   has "$out" '❯' && ! has "$out" 'nknown command|rror' && pass "without the git pack, the prompt works and shows no git part" || fail "without the git pack, the prompt works and shows no git part" "$out"
-  "$ROOT/pack" add git --no-tools >/dev/null 2>&1
-  out="$(fish -i -c 'set -g __boosh_git_data main 2 1 3 4 5 1 2; __boosh_git_format' 2>&1 | strip)"
-  [ "$out" = "main ⇡2 ⇣1 +3 !4 ?5 ✖1 *2" ] && pass "format: all counters" || fail "format: all counters" "$out"
-  out="$(fish -i -c 'set -g __boosh_git_data main 0 0 0 0 0 0 0; __boosh_git_format' 2>&1 | strip)"
-  [ "$out" = "main" ] && pass "format: zero counters are hidden" || fail "format: zero counters are hidden" "$out"
+  out="$(fish -i -c 'function __boosh_git_format; echo -n "fake-git"; end; true; fish_prompt' 2>&1 | strip)"
+  has "$out" 'fake-git' && pass "the prompt shows whatever __boosh_git_format (a pack) prints" || fail "the prompt shows whatever __boosh_git_format (a pack) prints" "$out"
+  out="$(fish -i -c 'set -e __boosh_prompt_active; set -l n (count (functions -n | string match "__boosh_git_*")); echo n=$n' 2>&1 | strip)"
+  has "$out" 'n=0' && pass "the core prompt itself carries no git code" || fail "the core prompt itself carries no git code" "$out"
   dur() { fish -i -c "set -g CMD_DURATION $1; emit fish_postexec x; echo \$__boosh_duration" 2>&1 | strip | tail -n 1; }
   [ "$(dur 1500)" = "" ] && [ "$(dur 5400)" = "5s" ] && [ "$(dur 65000)" = "1m5s" ] && [ "$(dur 3725000)" = "1h2m5s" ] && pass "command duration text" || fail "command duration text" "$(dur 1500)|$(dur 5400)|$(dur 65000)|$(dur 3725000)"
   # ---- the boosh-prompt command (settings are universal variables inside the throw-away $HOME)
@@ -337,7 +369,7 @@ if command -v fish >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
   fish -c "set -U fish_greeting ''" >/dev/null 2>&1   # no banner in front of the output we compare
   cd "$HOME"
   bp 'boosh-prompt --reset >/dev/null'
-  has "$(bp 'boosh-prompt')" "lines +2" && has "$(bp 'boosh-prompt')" "git +on" && pass "boosh-prompt: no flags shows the settings" || fail "boosh-prompt: no flags shows the settings"
+  has "$(bp 'boosh-prompt')" "lines +2" && has "$(bp 'boosh-prompt')" "git pack not installed" && pass "boosh-prompt: no flags shows the settings" || fail "boosh-prompt: no flags shows the settings"
   bp 'boosh-prompt --lines 1 --gap 0 >/dev/null'
   a="$(second 'true')"; [[ "$a" != *'\n'* ]] && pass "boosh-prompt --lines 1 --gap 0: one line, no gap" || fail "boosh-prompt --lines 1 --gap 0: one line, no gap" "$a"
   bp 'boosh-prompt --lines 2 --gap 2 >/dev/null'
@@ -350,18 +382,10 @@ if command -v fish >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
   a="$(second 'set -g CMD_DURATION 7000; emit fish_postexec x')"; [[ "$a" != *'7s'* ]] && pass "boosh-prompt --time off hides the command time" || fail "boosh-prompt --time off hides the command time" "$a"
   bp 'boosh-prompt --time on --time-after 5s >/dev/null'
   has "$(bp 'boosh-prompt')" "slower than 5000 ms" && pass "boosh-prompt --time-after 5s means 5000 ms" || fail "boosh-prompt --time-after 5s means 5000 ms"
-  bp 'boosh-prompt --fields modified,branch >/dev/null'
-  out="$(bp 'set -g __boosh_git_data main 2 1 3 4 5 1 2; __boosh_git_format')"
-  [ "$out" = "!4 main" ] && pass "boosh-prompt --fields: chosen parts, in the given order" || fail "boosh-prompt --fields: chosen parts, in the given order" "$out"
-  out="$(cd "$ROOT" && bp 'boosh-prompt --git on >/dev/null; emit fish_prompt; echo "pid=[$__boosh_git_pid]"')"
-  has "$out" 'pid=\[[0-9]+\]' && pass "git on: a background job is started" || fail "git on: a background job is started" "$out"
-  out="$(cd "$ROOT" && bp 'boosh-prompt --git off >/dev/null; emit fish_prompt; echo "pid=[$__boosh_git_pid]"')"
-  has "$out" 'pid=\[\]' && pass "boosh-prompt --git off: no background job at all" || fail "boosh-prompt --git off: no background job at all" "$out"
-  bp 'boosh-prompt --git on >/dev/null'
   before="$(bp 'echo $boosh_prompt_gap')"
   bp 'boosh-prompt --gap 3 --lines 7' >/dev/null 2>&1
   [ "$(bp 'echo $boosh_prompt_gap')" = "$before" ] && pass "boosh-prompt: one bad flag changes nothing" || fail "boosh-prompt: one bad flag changes nothing"
-  for bad in "--lines 7" "--gap 9" "--git maybe" "--fields nope" "--git off --fields branch" "--time-after soon" "--path wide" "--bogus"; do
+  for bad in "--lines 7" "--gap 9" "--time-after soon" "--path wide" "--bogus"; do
     out="$(bp "boosh-prompt $bad; echo exit=\$status")"
     has "$out" 'exit=2' && pass "boosh-prompt rejects $bad" || fail "boosh-prompt rejects $bad" "$out"
   done
@@ -374,18 +398,13 @@ if command -v fish >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
   firstbyte() { fish -i -c "$1; printf '@@'; fish_prompt" 2>/dev/null | strip | tr -d '\r' | awk 'BEGIN{RS="@@"} NR==2{printf "%s", $0}' | head -c 1 | od -An -c | tr -d ' '; }
   a="$(firstbyte 'emit fish_prompt')"; b="$(firstbyte 'emit fish_prompt; emit fish_prompt')"; c="$(firstbyte 'set -g boosh_prompt_gap false; emit fish_prompt; emit fish_prompt')"
   [ "$a" != '\n' ] && [ "$b" = '\n' ] && [ "$c" != '\n' ] && pass "prompt: empty line before every prompt but the first (boosh_prompt_gap=false turns it off)" || fail "prompt: empty line before every prompt but the first" "first=$a second=$b gap-off=$c"
-  out="$(fish -i -c 'set -g __boosh_git_data main 0 0 0 0 0 0 0; false; fish_prompt' 2>&1 | strip)"
+  out="$(fish -i -c 'false; fish_prompt' 2>&1 | strip)"
   has "$out" '✘1' && pass "prompt: exit code shown after a failure" || fail "prompt: exit code shown after a failure" "$out"
   one="$(fish -i -c 'set -g boosh_prompt_multiline false; true; fish_prompt' 2>&1 | strip | wc -l | tr -d ' ')"
   two="$(fish -i -c 'true; fish_prompt' 2>&1 | strip | wc -l | tr -d ' ')"
   [ "$one" = "0" ] && [ "$two" = "1" ] && pass "prompt: two lines by default, one with boosh_prompt_multiline=false" || fail "prompt: two lines by default, one with boosh_prompt_multiline=false" "newlines: one-line mode=$one, default=$two"
-  if [ "${BOOSH_TEST_PTY:-0}" = 1 ] && command -v script >/dev/null 2>&1; then
-    ( cd "$SC/b" && echo mod >> f1 && echo n > new1 && echo n > new2 )
-    out="$( cd "$SC/b" && { sleep 2; printf '\n'; sleep 2; printf 'exit\n'; sleep 0.5; } | LANG=C.UTF-8 script -qec "stty rows 20 cols 90; fish -i" /dev/null 2>/dev/null | tr -d '\r' | strip )"
-    has "$out" 'main.*!1.*\?2' && pass "async result repaints the prompt in a live fish" || fail "async result repaints the prompt in a live fish"
-  fi
 else
-  echo "  skip  fish or git is not installed"
+  echo "  skip  fish is not installed"
 fi
 
 echo "== menu library (needs a pty; set BOOSH_TEST_PTY=1 on Linux to run)"

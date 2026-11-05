@@ -118,14 +118,15 @@ $ ./pack status           # health check
 $ ./pack remove git       # removes the files again; installed programs are left alone
 ```
 
-A pack is a folder in `packs/<name>/`:
+A pack is a folder of the catalog (or the root of a repository):
 
 | File | What it does |
 |---|---|
-| `pack.conf` | `DESCRIPTION=...` and optional `TOOL=command\|brew package\|apt package\|description` lines. |
+| `pack.conf` | `DESCRIPTION=...`, `API=1` (the pack format; a pack that needs a newer one is refused) and optional `TOOL=command\|brew package\|apt package\|description` lines. Not required for a plain fisher plugin. |
 | `fish.fish` | linked to `~/.config/fish/conf.d/pack-<name>.fish` (abbreviations, startup code). |
 | `functions/*.fish` | each linked to `~/.config/fish/functions/` (autoloaded fish functions). |
 | `completions/*.fish` | each linked to `~/.config/fish/completions/` (tab completion). |
+| `conf.d/*.fish`, `themes/*.theme` | the rest of the fisher layout, linked by name into `~/.config/fish/conf.d/` and `themes/`. |
 | `extras/NAME/` | an **optional part** with its own `extra.conf` (`DESCRIPTION=...`) and `fish.fish`, `functions/`, `completions/`. Installed only on request: `./pack add PACK --NAME`; removed alone with `./pack remove PACK --NAME`. A plain `./pack add PACK` keeps the parts you already installed. |
 | `gitconfig` | linked to `~/.config/git/pack-<name>.conf` and pulled in with one `include.path` line. |
 | `gitconfig.<tool>` | the same, but **only while `<tool>` is on `PATH`** (for example `delta` as git's pager). |
@@ -139,7 +140,35 @@ Safety rules built into `pack`:
 - Optional tools are installed with Homebrew if present, otherwise with `apt` when the package exists there;
   otherwise you are told to install it yourself.
 
-Included packs: **git** (abbreviations such as `gst`, `gd`, `gcm`, `gl`, git info in the boosh prompt (branch, ahead/behind, staged, modified, untracked, stashes; computed in the background) and in fish's own prompt, and a few
+### Where packs come from
+
+```
+./pack add git                      # a pack of boosh: shipped here, or downloaded from the catalog
+./pack add PatrickF1/fzf.fish       # any GitHub plugin, fisher style: OWNER/REPO[@tag|branch|commit]
+./pack add github:OWNER/REPO@v1.2   # the same, spelled out
+./pack add https://host/x.tar.gz    # an archive
+./pack add ./my-plugin              # a folder (development, offline)
+./pack show OWNER/REPO              # look at it first: installs nothing
+./pack update [NAME]                # download again and re-apply (all installed packs without a name)
+./pack list --remote                # also lists the packs of the catalog
+```
+
+- **Base and packs live apart.** This repository holds the installer and the `pack` tool; the packs themselves are in
+  the catalog repository [booosh-packs](https://github.com/Bopster410/booosh-packs). `packs.conf` names it
+  (`CATALOG=github:Bopster410/booosh-packs@main`, or the environment variable `BOOSH_CATALOG`, which can also be a
+  local folder). `./pack add NAME` downloads the pack on first use; installed packs keep working offline (they are
+  snapshots in `~/.local/share/booosh/packs/`). Pin the catalog to a full commit hash (`@<40 hex digits>`) for
+  reproducible installs: a branch or tag can move.
+- **Fisher layout is understood.** A plugin needs no `pack.conf`: its `conf.d/`, `functions/`, `completions/` and
+  `themes/` are linked file by file, and its `NAME_install`, `NAME_update` and `NAME_uninstall` events are emitted the
+  way fisher does (`PatrickF1/fzf.fish` is installed as the pack `fzf-fish`, event name `fzf`). It is not a fisher
+  replacement: there is no `fish_plugins` file, so do not install the same plugin with both.
+- **Code from outside is treated as such.** Anything that is not a pack of boosh is shown (source, archive sha256,
+  every file it will add, tools) and needs a yes (`--yes` skips the question). Only https is used, an archive with
+  symbolic links is refused, and `pack` stops before changing anything if a file already belongs to another pack or to
+  the boosh prompt. Where a pack came from is recorded in `~/.local/share/booosh/packs/NAME/.source`.
+
+Packs of the catalog: **git** (abbreviations such as `gst`, `gd`, `gcm`, `gl`, git info in the boosh prompt (branch, ahead/behind, staged, modified, untracked, stashes; computed in the background) and in fish's own prompt, and a few
 safe settings: `init.defaultBranch`, `push.autoSetupRemote`, `fetch.prune`, `rerere.enabled`, and output/convenience ones such as
 `merge.conflictStyle=zdiff3`, `diff.algorithm=histogram`, `branch.sort=-committerdate`, `tag.sort=version:refname`; how `pull` works is never changed),
 and an optional part `--tag`: `./pack add git --tag` adds `gtag patch|minor|major` (the next semver tag; asks before creating it, never pushes) and **docker**
@@ -196,7 +225,8 @@ What the shell and Ghostty read lives in a **stable core**, not in your checkout
 ~/.local/share/booosh/
 ├── core -> generations/0007-...     the current snapshot; everything installed points behind it
 ├── generations/0006-..., 0007-...   one complete snapshot per install (the last 5 are kept)
-├── packs/git, packs/docker          snapshots of the installed packs
+├── packs/git, packs/docker          snapshots of the installed packs (with a .source file: where each came from)
+├── cache/                           the downloaded catalog (a copy; deleting it is harmless)
 └── manifest                         what boosh put where
 ```
 
@@ -247,7 +277,7 @@ Per-machine tweaks belong in `~/.config/ghostty/local.conf` (yours); the generat
 
 - **Editor**: create `editors/<name>/` with an `editor.conf` (`DESCRIPTION`, `COMMAND`, `FILE`, `TARGET`) and the
   config file. It shows up in the menu by itself.
-- **Pack**: create `packs/<name>/` as described above. `./pack list` finds it by itself.
+- **Pack**: add a folder to the catalog repository as described above (try it before publishing with `BOOSH_CATALOG=./my-catalog ./pack list`, or `./pack add ./my-pack`).
 - **Appearance preset**: add `ghostty/appearance/<name>.conf` and the name to `PRESETS` in `install.sh`
   (plus a hint in `menu_desc`).
 - **Keybind preset**: add `ghostty/keys/<name>.conf` (use `@MOD@` for the modifier) and the name to `KEYSETS`.
@@ -274,11 +304,13 @@ bash tests/smoke.sh                       # runs in a throw-away $HOME
 BOOSH_TEST_PTY=1 bash tests/smoke.sh      # also drives the arrow-key menu through a pty (Linux)
 ```
 
-The suite covers the installer flags and validation, idempotence, `--dry-run`, the cheatsheet, and the whole pack
-lifecycle (including conflicts and the `delta` safeguard), the prompt install and the git pack's parser (dirty, detached
-HEAD, merge conflict, not a repo), the stable core (generations, rollback, importing an old config, uninstall, `--check`, and
-that everything keeps working after the repository is deleted), formatting, command time and, with the pty flag, the asynchronous repaint in a live fish. It does not need `ghostty` or `fish`; checks that need them
-are skipped.
+The suite covers the installer flags and validation, idempotence, `--dry-run`, the cheatsheet, the machinery of `pack`
+(links, git include, conflicts, the `delta` safeguard, optional parts, catalogs, GitHub and folder sources, fisher-style
+plugins and their events, collisions), the prompt itself, and the stable core (generations, rollback, importing an old
+config, uninstall, `--check`, and that everything keeps working after the repository is deleted). It uses a tiny
+fixture catalog (`tests/fixtures/catalog`) and a fake `curl`, so it needs no network. It does not need `ghostty` or
+`fish`; checks that need them are skipped. The content of the real packs (`gtag`, `gsync`, the git settings, the git
+part of the prompt and its parser) is tested in the [booosh-packs](https://github.com/Bopster410/booosh-packs) repository.
 
 ## License
 

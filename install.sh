@@ -607,7 +607,7 @@ mode_uninstall() {
   for owner in $(mf_owners_like install:); do mf_forget "$owner"; done
   rm -f "$GH/.install-choices" "$GH/cheatsheet.md"
   if [ -z "$(mf_owners_like pack:)" ]; then
-    rm -rf "$BH_CORE" "$BH_GENS" "$BH_MANIFEST"; rmdir "$BH_PACKS" "$BOOSH_HOME" 2>/dev/null || true
+    rm -rf "$BH_CORE" "$BH_GENS" "$BH_MANIFEST" "$BOOSH_HOME/cache"; rmdir "$BH_PACKS" "$BOOSH_HOME" 2>/dev/null || true
     echo "removed the core and all generations"
   else
     rm -rf "$BH_CORE" "$BH_GENS"; echo "removed the core and all generations (installed packs stay: ./pack remove NAME)"

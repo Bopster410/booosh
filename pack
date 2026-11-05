@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
 # Optional terminal setups ("packs") on top of the core install.
 # A pack only drops files into places the tools already read:
-#   fish   ~/.config/fish/conf.d/pack-<name>.fish, and every functions/*.fish and completions/*.fish of the pack into ~/.config/fish/functions/ and completions/
+#   fish   ~/.config/fish/{conf.d,functions,completions,themes}/ (the layout fisher uses), plus conf.d/pack-<name>.fish
 #   git    ~/.config/git/pack-<name>[-<tool>].conf, pulled in by one include.path line
 # Removing a pack removes exactly those files again. Core config is never edited.
 #
-#   ./pack list                  what exists / what is installed (with the optional parts of each pack)
-#   ./pack show git              files, parts, tools and abbreviations of a pack
-#   ./pack add git [docker ...]  install; asks before installing optional tools
-#   ./pack add git --tag         install a pack together with one of its optional parts (see ./pack show git)
-#   ./pack remove git            unlink the pack and its parts (installed tools are left alone)
-#   ./pack remove git --tag      unlink only that part
+#   ./pack list                  packs: installed ones and those of the catalog (downloaded when needed)
+#   ./pack show git              files, parts, tools and abbreviations (also for a source you have not installed yet)
+#   ./pack add git [docker ...]  install packs (a pack that is not shipped here is downloaded from the catalog)
+#   ./pack add git --tag         ... together with one of its optional parts (see ./pack show git)
+#   ./pack add OWNER/REPO[@REF]  install a fish plugin from GitHub, fisher style; also github:OWNER/REPO, https://...tar.gz, ./folder
+#   ./pack update [NAME ...]     download again and re-apply (every installed pack when no name is given)
+#   ./pack remove git [--tag]    unlink the pack (or only that part); installed tools are left alone
 #   ./pack status                health check of installed packs
-# Options: --dry-run  --yes (accept git-setting conflicts)  --with-tools  --no-tools  --ask
+# Options: --dry-run  --yes (accept git-setting conflicts, and "install code from this source")  --with-tools  --no-tools
+#          --ask  --remote (when a packs/ folder sits next to this script, ignore it and use the catalog)
 # Works with bash 3.2 (macOS system bash).
 set -euo pipefail
 
@@ -21,7 +23,6 @@ PACKS="$SRC/packs"
 CFG="$HOME/.config"
 STATE="$CFG/boosh/packs"
 FISH_DIR="$CFG/fish/conf.d"
-FISH_SUBS="functions completions"   # pack folders that are linked file by file into ~/.config/fish/<folder>/
 GIT_DIR="$CFG/git"
 
 die() { echo "error: $*" >&2; exit 1; }
@@ -30,10 +31,13 @@ die() { echo "error: $*" >&2; exit 1; }
 . "$SRC/lib/menu.sh"
 # shellcheck source=lib/state.sh
 . "$SRC/lib/state.sh"
+# shellcheck source=lib/source.sh
+. "$SRC/lib/source.sh"
+PACK_API=1   # the pack format this tool understands (a pack may say API=N in pack.conf)
 
-usage() { sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//'; }
 
-DRY=0; YES=0; ASK=0; TOOLS=ask
+DRY=0; YES=0; ASK=0; REMOTE=0; TOOLS=ask
 POS=()
 EXTRAS=()   # --NAME that is not an option of this tool: an optional part of a pack (./pack add git --tag)
 while [ $# -gt 0 ]; do
@@ -41,6 +45,7 @@ while [ $# -gt 0 ]; do
     --dry-run)    DRY=1 ;;
     --yes|-y)     YES=1 ;;
     --ask)        ASK=1 ;;
+    --remote)     REMOTE=1 ;;
     --with-tools) TOOLS=yes ;;
     --no-tools)   TOOLS=no ;;
     -h|--help)    usage; exit 0 ;;
@@ -56,6 +61,10 @@ NAMES=()
 if [ ${#POS[@]} -gt 1 ]; then NAMES=("${POS[@]:1}"); fi
 
 # ─── helpers ─────────────────────────────────────────────
+TMPS=()
+cleanup() { local t; if [ ${#TMPS[@]} -gt 0 ]; then for t in "${TMPS[@]}"; do rm -rf "$t"; done; fi; return 0; }
+trap cleanup EXIT
+
 run() { if [ "$DRY" = 1 ]; then echo "would run: $*"; else "$@"; fi; }
 
 confirm() { # confirm "question" [y|n]   (non-interactive: the default)
@@ -107,8 +116,18 @@ unlink_ours() { # unlink_ours TARGET PACKNAME : only removes symlinks that point
 
 # a pack is known if it is in this repository or already installed (its snapshot): so `remove` and `status` keep
 # working after a branch switch
-pdir() { if [ -f "$BH_PACKS/$1/pack.conf" ]; then echo "$BH_PACKS/$1"; else echo "$PACKS/$1"; fi; }
-valid_name() { case "$1" in ''|*[!a-z0-9_-]*) return 1 ;; esac; [ -f "$PACKS/$1/pack.conf" ] || [ -f "$BH_PACKS/$1/pack.conf" ]; }
+PK_NAME=""; PK_DIR=""   # the pack being added or shown right now, and the folder it is read from (a download, the catalog, this repository)
+pdir() {
+  if [ -n "$PK_NAME" ] && [ "$1" = "$PK_NAME" ]; then echo "$PK_DIR"
+  elif [ -f "$BH_PACKS/$1/pack.conf" ]; then echo "$BH_PACKS/$1"
+  elif [ "$REMOTE" != 1 ] && [ -f "$PACKS/$1/pack.conf" ]; then echo "$PACKS/$1"
+  elif [ -n "$CATALOG_DIR" ] && [ -f "$CATALOG_DIR/$1/pack.conf" ]; then echo "$CATALOG_DIR/$1"
+  else echo "$PACKS/$1"; fi
+}
+valid_name() {
+  case "$1" in ''|*[!a-z0-9_-]*) return 1 ;; esac
+  [ -f "$BH_PACKS/$1/pack.conf" ] || [ -f "$PACKS/$1/pack.conf" ] || { [ -n "$CATALOG_DIR" ] && [ -f "$CATALOG_DIR/$1/pack.conf" ]; }
+}
 need_pack() { valid_name "$1" || die "no such pack: '$1' (see: ./pack list)"; }
 
 # optional parts ("extras") of a pack: packs/NAME/extras/PART/{extra.conf,functions/,completions/,fish.fish}
@@ -127,8 +146,9 @@ check_parts() { # check_parts PACK... : every --PART you gave must exist in ever
   done
 }
 
-conf_get()   { sed -n "s/^$2=//p" "$(pdir "$1")/pack.conf" | head -n 1; }
-conf_tools() { sed -n 's/^TOOL=//p' "$(pdir "$1")/pack.conf"; }
+conf_get()   { [ -f "$(pdir "$1")/pack.conf" ] || return 0; sed -n "s/^$2=//p" "$(pdir "$1")/pack.conf" | head -n 1; }
+conf_tools() { [ -f "$(pdir "$1")/pack.conf" ] || return 0; sed -n 's/^TOOL=//p' "$(pdir "$1")/pack.conf"; }
+meta_get()   { [ -f "$BH_PACKS/$1/.source" ] || return 0; sed -n "s/^$2=//p" "$BH_PACKS/$1/.source" | head -n 1; }   # provenance of an installed pack
 field()      { echo "$1" | cut -d'|' -f"$2"; }
 
 is_installed() { [ -f "$STATE" ] && grep -Fxq "$1" "$STATE"; }
@@ -218,39 +238,57 @@ git_detach() { # git_detach LINK_NAME PACKNAME
   unlink_ours "$GIT_DIR/$name" "$pack"
 }
 
-# ─── fish files of a pack or of one of its parts ────────
-link_fish_dir() { # link_fish_dir DIR SNIPPET : DIR/fish.fish -> conf.d/SNIPPET.fish, DIR/functions|completions/*.fish -> ~/.config/fish/...
-  local d="$1" snip="$2" sub f
-  [ ! -f "$d/fish.fish" ] || link "$d/fish.fish" "$FISH_DIR/$snip.fish"
-  for sub in $FISH_SUBS; do
+# ─── fish files of a pack or of one of its parts (the layout fisher plugins use) ─────
+pack_fish_files() { # pack_fish_files DIR : "SUBFOLDER<TAB>FILE" for every file that goes into ~/.config/fish/
+  local d="$1" sub f
+  for sub in functions completions conf.d; do
     for f in "$d/$sub"/*.fish; do
       [ -f "$f" ] || continue
-      link "$f" "$CFG/fish/$sub/$(basename "$f")"
+      printf '%s\t%s\n' "$sub" "$f"
     done
   done
+  for f in "$d/themes"/*.theme; do
+    [ -f "$f" ] || continue
+    printf 'themes\t%s\n' "$f"
+  done
+  return 0
+}
+
+live_paths_of() { # live_paths_of DIR SNIPPET : where this pack (or part) would put its files
+  local d="$1" snip="$2" sub f
+  [ ! -f "$d/fish.fish" ] || echo "$FISH_DIR/$snip.fish"
+  while IFS=$'\t' read -r sub f; do
+    echo "$CFG/fish/$sub/$(basename "$f")"
+  done < <(pack_fish_files "$d")
+  return 0
+}
+
+link_fish_dir() { # link_fish_dir DIR SNIPPET : DIR/fish.fish -> conf.d/SNIPPET.fish, the rest by name into ~/.config/fish/<folder>/
+  local d="$1" snip="$2" sub f
+  [ ! -f "$d/fish.fish" ] || link "$d/fish.fish" "$FISH_DIR/$snip.fish"
+  while IFS=$'\t' read -r sub f; do
+    link "$f" "$CFG/fish/$sub/$(basename "$f")"
+  done < <(pack_fish_files "$d")
+  return 0
 }
 
 unlink_fish_dir() { # unlink_fish_dir DIR SNIPPET PACK
   local d="$1" snip="$2" pack="$3" sub f
   if [ -f "$d/fish.fish" ]; then unlink_ours "$FISH_DIR/$snip.fish" "$pack"; [ "$DRY" = 1 ] || mf_drop_live "$FISH_DIR/$snip.fish"; fi
-  for sub in $FISH_SUBS; do
-    for f in "$d/$sub"/*.fish; do
-      [ -f "$f" ] || continue
-      unlink_ours "$CFG/fish/$sub/$(basename "$f")" "$pack"
-      [ "$DRY" = 1 ] || mf_drop_live "$CFG/fish/$sub/$(basename "$f")"
-    done
-  done
+  while IFS=$'\t' read -r sub f; do
+    unlink_ours "$CFG/fish/$sub/$(basename "$f")" "$pack"
+    [ "$DRY" = 1 ] || mf_drop_live "$CFG/fish/$sub/$(basename "$f")"
+  done < <(pack_fish_files "$d")
+  return 0
 }
 
 list_fish_dir() { # list_fish_dir DIR SNIPPET INDENT
   local d="$1" snip="$2" ind="$3" sub f
   [ ! -f "$d/fish.fish" ] || echo "${ind}fish   $FISH_DIR/$snip.fish"
-  for sub in $FISH_SUBS; do
-    for f in "$d/$sub"/*.fish; do
-      [ -f "$f" ] || continue
-      echo "${ind}fish   $CFG/fish/$sub/$(basename "$f")"
-    done
-  done
+  while IFS=$'\t' read -r sub f; do
+    echo "${ind}fish   $CFG/fish/$sub/$(basename "$f")"
+  done < <(pack_fish_files "$d")
+  return 0
 }
 
 check_fish_dir() { # check_fish_dir DIR SNIPPET PACK : prints a WARN line per problem, fails if there was one
@@ -260,24 +298,123 @@ check_fish_dir() { # check_fish_dir DIR SNIPPET PACK : prints a WARN line per pr
     if [ ! -L "$live" ]; then echo "WARN  $name: $live is missing (run: ./pack add $name)"; bad=1
     elif [ ! -e "$live" ]; then echo "WARN  $name: $live is a BROKEN link (run: ./pack add $name)"; bad=1; fi
   fi
-  for sub in $FISH_SUBS; do
-    for f in "$d/$sub"/*.fish; do
-      [ -f "$f" ] || continue
-      live="$CFG/fish/$sub/$(basename "$f")"
-      if [ ! -L "$live" ] || [ ! -e "$live" ]; then echo "WARN  $name: $live is missing or broken (run: ./pack add $name)"; bad=1; fi
-    done
-  done
+  while IFS=$'\t' read -r sub f; do
+    live="$CFG/fish/$sub/$(basename "$f")"
+    if [ ! -L "$live" ] || [ ! -e "$live" ]; then echo "WARN  $name: $live is missing or broken (run: ./pack add $name)"; bad=1; fi
+  done < <(pack_fish_files "$d")
   [ "$bad" = 0 ]
+}
+
+# two packs (or a pack and the boosh prompt) must never fight over one file: stop before anything is changed
+preflight() { # preflight NAME SRCDIR
+  local name="$1" d="$2" x paths p own bad=""
+  paths="$( live_paths_of "$d" "pack-$name"
+            for x in $(extras_of "$name"); do
+              if requested "$x" || is_installed "$name+$x"; then live_paths_of "$d/extras/$x" "pack-$name-$x"; fi
+            done )"
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    own="$(mf_owner_of "$p")"
+    if [ -n "$own" ] && [ "$own" != "pack:$name" ]; then bad="$bad
+  $p  (belongs to $own)"; fi
+  done <<EOF
+$paths
+EOF
+  [ -z "$bad" ] || die "cannot install '$name': these files already belong to something else:$bad
+Remove that first (./pack remove NAME; for the boosh prompt: ./install.sh --only prompt --prompt default). Nothing was changed."
+}
+
+# fisher plugins can react to being installed or removed (a conf.d function --on-event NAME_install / _update / _uninstall):
+# do what fisher does, source the plugin's conf.d files in a clean fish and emit the event
+fish_event() { # fish_event PLUGIN EVENT DIR
+  local plugin="$1" ev="$2" d="$3" f files
+  files=()
+  if [ "$DRY" = 1 ] || ! have_cmd fish; then return 0; fi
+  for f in "$d"/conf.d/*.fish; do
+    [ -f "$f" ] || continue
+    files[${#files[@]}]="$f"
+  done
+  [ ${#files[@]} -gt 0 ] || return 0
+  fish --no-config -c 'set -l plugin $argv[1]; set -l ev $argv[2]; for f in $argv[3..-1]; source $f; end; emit "$plugin"_"$ev"' "$plugin" "$ev" "${files[@]}" </dev/null >/dev/null 2>&1 \
+    || echo "warn    the ${plugin}_$ev handler of this plugin reported an error (ignored)"
+  return 0
+}
+
+# ─── finding a pack: shipped here, in the catalog, or any source ────
+PK_ARG=""; PK_KIND=""; PK_SPEC=""; PK_PLUGIN=""
+resolve_arg() { # resolve_arg ARG : find the pack, downloading if needed. Sets PK_NAME PK_DIR PK_KIND PK_SPEC PK_PLUGIN
+  local arg="$1" kind t base
+  PK_ARG="$arg"; PK_NAME=""; PK_DIR=""; PK_KIND=""; PK_SPEC=""; PK_PLUGIN=""; FETCH_SHA=""
+  kind="$(src_kind "$arg")"
+  case "$kind" in
+    bad) die "plain http:// is not allowed: use https://" ;;
+    none)
+      case "$arg" in ''|*[!a-z0-9_-]*) die "'$arg' is neither a pack name nor a source (OWNER/REPO, https://..., a folder)" ;; esac
+      if [ "$REMOTE" != 1 ] && [ -f "$PACKS/$arg/pack.conf" ]; then
+        PK_KIND=bundled; PK_DIR="$PACKS/$arg"; PK_SPEC="this repository"
+      else
+        catalog_load || die "pack '$arg' is not shipped here and the catalog could not be loaded (BOOSH_CATALOG, packs.conf)"
+        [ -f "$CATALOG_DIR/$arg/pack.conf" ] || die "pack '$arg' is not in the catalog $(catalog_spec) (see: ./pack list --remote)"
+        PK_KIND=catalog; PK_DIR="$CATALOG_DIR/$arg"; PK_SPEC="$(catalog_spec)"
+      fi
+      PK_NAME="$arg"; PK_PLUGIN="$arg" ;;
+    *)
+      t="$(mktemp -d "${TMPDIR:-/tmp}/boosh-src.XXXXXX")"; TMPS[${#TMPS[@]}]="$t"
+      echo "fetch   $arg"
+      fetch_into "$arg" "$t" || die "could not get '$arg'"
+      base="${arg#github:}"; base="${base%%@*}"; base="$(basename "$(src_path "$base")")"
+      PK_NAME="$(src_slug "$base")"; PK_PLUGIN="$(src_plugin_name "$base")"
+      [ -n "$PK_NAME" ] || die "cannot derive a pack name from '$arg'"
+      if [ ! -f "$t/pack.conf" ] && [ ! -f "$t/fish.fish" ] && [ ! -d "$t/conf.d" ] && [ ! -d "$t/functions" ] \
+         && [ ! -d "$t/completions" ] && [ ! -d "$t/themes" ] && [ ! -f "$t/gitconfig" ]; then
+        die "'$arg' has nothing to install: no pack.conf, fish.fish, conf.d/, functions/, completions/ or themes/ at its top level"
+      fi
+      PK_KIND=external; PK_DIR="$t"; PK_SPEC="$arg" ;;
+  esac
+}
+
+trust_prompt() { # trust_prompt NAME DIR : third-party code runs in every fish session: show what it is and ask
+  local name="$1" d="$2" t
+  echo
+  echo "Source:   $PK_SPEC${FETCH_SHA:+  (archive sha256 ${FETCH_SHA})}"
+  echo "This is code from outside boosh. Once installed it runs in every new fish session"
+  echo "(and a gitconfig in it changes git). It will add:"
+  list_fish_dir "$d" "pack-$name" "  "
+  [ ! -f "$d/gitconfig" ] || echo "  git    settings from its gitconfig"
+  while IFS= read -r t; do
+    [ -n "$t" ] || continue
+    echo "  tool   $(field "$t" 1): $(field "$t" 4)"
+  done <<EOF
+$(conf_tools "$name")
+EOF
+  echo "Read it first with: ./pack show $PK_ARG"
+  if [ "$YES" = 1 ] || confirm "Install '$name' from $PK_SPEC?" n; then return 0; fi
+  die "cancelled (nothing was changed). Use --yes to accept without the question."
+}
+
+write_meta() { # write_meta NAME : where an installed pack came from
+  if [ "$DRY" = 1 ]; then return 0; fi
+  { echo "arg=$PK_ARG"; echo "kind=$PK_KIND"; echo "plugin=$PK_PLUGIN"; echo "source=$PK_SPEC"
+    echo "archive_sha256=${FETCH_SHA:-}"; echo "installed=$(date +%Y-%m-%d)"; } > "$BH_PACKS/$1/.source"
+  return 0
 }
 
 # ─── commands ────────────────────────────────────────────
 cmd_list() {
-  local d name st tools t cmd missing x
-  for d in "$PACKS"/*/; do
-    [ -f "${d}pack.conf" ] || continue
-    name="$(basename "$d")"
+  local d name st t cmd missing x names kind
+  catalog_load || echo "warn    the catalog is not available: only installed packs are listed"
+  # every pack we know of: shipped here, in the catalog, installed
+  names="$( {
+      for d in "$PACKS"/*/; do if [ -f "${d}pack.conf" ]; then basename "$d"; fi; done
+      if [ -n "$CATALOG_DIR" ]; then for d in "$CATALOG_DIR"/*/; do if [ -f "${d}pack.conf" ]; then basename "$d"; fi; done; fi
+      if [ -f "$STATE" ]; then grep -v '+' "$STATE" || true; fi
+    } | sort -u || true )"
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
     if is_installed "$name"; then st="installed"; else st="available"; fi
     printf '  %-12s %-10s %s\n' "$name" "$st" "$(conf_get "$name" DESCRIPTION)"
+    kind="$(meta_get "$name" kind)"
+    if [ "$kind" = external ]; then printf '  %-12s %-10s from %s\n' "" "" "$(meta_get "$name" source)"; fi
     missing=""
     while IFS= read -r t; do
       [ -n "$t" ] || continue
@@ -290,15 +427,26 @@ EOF
     for x in $(extras_of "$name"); do
       printf '  %-12s %-10s part --%s (%s): %s\n' "" "" "$x" "$(is_installed "$name+$x" && echo installed || echo "not installed")" "$(extra_desc "$name" "$x")"
     done
-  done
+  done <<EOF
+$names
+EOF
+  echo
+  echo "catalog: $(catalog_spec)$(src_pinned "$(catalog_spec)" || echo ' (not pinned to a commit)')"
+  echo "any GitHub plugin works too: ./pack add OWNER/REPO   (preview it first: ./pack show OWNER/REPO)"
 }
 
 cmd_show() {
-  local name="$1" t x P_DIR
-  need_pack "$name"
+  local arg="$1" name t x P_DIR
+  if [ "$(src_kind "$arg")" = none ] && [ "$REMOTE" != 1 ] && valid_name "$arg"; then
+    name="$arg"
+  else
+    resolve_arg "$arg"; name="$PK_NAME"
+  fi
   P_DIR="$(pdir "$name")"
   echo "$name: $(conf_get "$name" DESCRIPTION)"
   echo "status: $(is_installed "$name" && echo installed || echo available)"
+  if [ "$name" = "$PK_NAME" ]; then echo "source: $PK_SPEC${FETCH_SHA:+ (archive sha256 $FETCH_SHA)}"
+  elif [ -n "$(meta_get "$name" source)" ]; then echo "source: $(meta_get "$name" source)"; fi
   echo "files:"
   list_fish_dir "$P_DIR" "pack-$name" "  "
   [ ! -f "$P_DIR/gitconfig" ] || echo "  git    $GIT_DIR/pack-$name.conf (+ include.path in ~/.gitconfig)"
@@ -326,14 +474,38 @@ cmd_show() {
     echo "git settings it adds:"
     git_ok && git config -f "$P_DIR/gitconfig" --list | sed 's/^/  /' || echo "  (git not installed)"
   fi
+  return 0
 }
 
 cmd_add() {
-  local name="$1" t cmd f x suffix P_DIR
-  need_pack "$name"
-  [ -f "$PACKS/$name/pack.conf" ] || die "pack '$name' is not in this repository (it is installed from another checkout); remove it with: ./pack remove $name"
+  local arg="$1" name t cmd f x suffix P_SRC P_DIR api was_installed=0 prev_arg prev_kind
+  resolve_arg "$arg"
+  name="$PK_NAME"; P_SRC="$PK_DIR"
+
+  api=""; if [ -f "$P_SRC/pack.conf" ]; then api="$(sed -n 's/^API=//p' "$P_SRC/pack.conf" | head -n 1)"; fi
+  if [ -n "$api" ]; then
+    case "$api" in *[!0-9]*) die "pack '$name': API= in its pack.conf must be a number" ;; esac
+    [ "$api" -le "$PACK_API" ] || die "pack '$name' needs a newer boosh (it speaks pack API $api, this one $PACK_API): update boosh first"
+  fi
+  if [ ${#EXTRAS[@]} -gt 0 ]; then
+    for x in "${EXTRAS[@]}"; do
+      is_extra "$name" "$x" || die "'--$x' is not an option, and pack '$name' has no part '$x' (see: ./pack show $arg)"
+    done
+  fi
+  if is_installed "$name"; then
+    was_installed=1
+    prev_arg="$(meta_get "$name" arg)"; prev_kind="$(meta_get "$name" kind)"
+    if [ -n "$prev_kind" ] && { [ "$prev_kind" = external ] || [ "$PK_KIND" = external ]; } && [ "$prev_arg" != "$PK_ARG" ]; then
+      die "'$name' is already installed from '${prev_arg:-another source}': run ./pack remove $name first"
+    fi
+  elif [ "$PK_KIND" = external ] && { catalog_load 2>/dev/null || true; } && { [ -f "$PACKS/$name/pack.conf" ] || { [ -n "$CATALOG_DIR" ] && [ -f "$CATALOG_DIR/$name/pack.conf" ]; }; }; then
+    die "the name '$name' belongs to a pack of boosh; rename the folder or the repository of '$arg' to install it"
+  fi
+  if [ "$PK_KIND" = external ] && [ "$(meta_get "$name" arg)" != "$PK_ARG" ]; then trust_prompt "$name" "$P_SRC"; fi
+  preflight "$name" "$P_SRC"
+
   MF_NEW=()
-  if is_installed "$name"; then echo "== $name (already installed, re-applying)"; else echo "== $name"; fi
+  if [ "$was_installed" = 1 ]; then echo "== $name (already installed, re-applying)"; else echo "== $name"; fi
 
   # the tool list goes through fd 3 so that stdin stays free for the y/N questions
   while IFS= read -r t <&3; do
@@ -344,9 +516,11 @@ $(conf_tools "$name")
 EOF
 
   # the files the shell and git read live in a snapshot outside the repository, so a branch switch cannot break them
-  P_DIR="$PACKS/$name"
+  P_DIR="$P_SRC"
   if [ "$DRY" = 0 ]; then
-    mkdir -p "$BH_PACKS"; rm -rf "$BH_PACKS/$name"; cp -R "$PACKS/$name" "$BH_PACKS/$name"; P_DIR="$BH_PACKS/$name"
+    mkdir -p "$BH_PACKS"; rm -rf "${BH_PACKS:?}/$name"; cp -R "$P_SRC" "$BH_PACKS/$name"; P_DIR="$BH_PACKS/$name"
+    [ -f "$P_DIR/pack.conf" ] || echo "DESCRIPTION=plugin from $PK_SPEC" > "$P_DIR/pack.conf"
+    write_meta "$name"
   fi
 
   link_fish_dir "$P_DIR" "pack-$name"
@@ -379,11 +553,31 @@ EOF
 
   state_add "$name"
   [ "$DRY" = 1 ] || mf_commit "pack:$name"
+  if [ "$was_installed" = 1 ]; then fish_event "$PK_PLUGIN" update "$P_DIR"; else fish_event "$PK_PLUGIN" install "$P_DIR"; fi
   echo "done    $name. Open a new fish session (or: exec fish) to use it."
 }
 
+cmd_update() {
+  local n arg names
+  names=()
+  if [ ${#NAMES[@]} -gt 0 ]; then names=("${NAMES[@]}")
+  elif [ -f "$STATE" ]; then
+    while IFS= read -r n; do
+      case "$n" in ''|*+*) continue ;; esac
+      names[${#names[@]}]="$n"
+    done < "$STATE"
+  fi
+  if [ ${#names[@]} -eq 0 ]; then echo "no packs installed (see: ./pack list)"; return 0; fi
+  for n in "${names[@]}"; do
+    valid_name "$n" || die "no such pack: '$n' (see: ./pack list)"
+    is_installed "$n" || die "'$n' is not installed (./pack add $n)"
+    arg="$(meta_get "$n" arg)"
+    cmd_add "${arg:-$n}"
+  done
+}
+
 cmd_remove() {
-  local name="$1" f x suffix P_DIR
+  local name="$1" f x suffix P_DIR plugin
   need_pack "$name"
   P_DIR="$(pdir "$name")"
   if [ ${#EXTRAS[@]} -gt 0 ]; then   # only the named parts
@@ -396,6 +590,8 @@ cmd_remove() {
     return 0
   fi
   echo "== remove $name"
+  plugin="$(meta_get "$name" plugin)"
+  fish_event "${plugin:-$name}" uninstall "$P_DIR"
   unlink_fish_dir "$P_DIR" "pack-$name" "$name"
   for x in $(extras_of "$name"); do
     unlink_fish_dir "$P_DIR/extras/$x" "pack-$name-$x" "$name"
@@ -408,7 +604,7 @@ cmd_remove() {
       git_detach "pack-$name-${f##*.}.conf" "$name"
     done
   fi
-  [ "$DRY" = 1 ] || { rm -rf "$BH_PACKS/$name"; mf_forget "pack:$name"; }
+  [ "$DRY" = 1 ] || { rm -rf "${BH_PACKS:?}/$name"; mf_forget "pack:$name"; }
   state_del "$name"
   echo "done    $name removed. Tools it may have installed are still on your system."
 }
@@ -445,8 +641,9 @@ cmd_status() {
 case "$CMD" in
   list)   cmd_list ;;
   status) cmd_status ;;
-  show)   [ ${#NAMES[@]} -gt 0 ] || die "usage: ./pack show NAME"; cmd_show "${NAMES[0]}" ;;
-  add)    [ ${#NAMES[@]} -gt 0 ] || die "usage: ./pack add NAME... [--PART]"; check_parts "${NAMES[@]}"; for n in "${NAMES[@]}"; do cmd_add "$n"; done ;;
+  show)   [ ${#NAMES[@]} -gt 0 ] || die "usage: ./pack show NAME|SOURCE"; cmd_show "${NAMES[0]}" ;;
+  add)    [ ${#NAMES[@]} -gt 0 ] || die "usage: ./pack add NAME|SOURCE... [--PART]"; for n in "${NAMES[@]}"; do cmd_add "$n"; done ;;
+  update) cmd_update ;;
   remove) [ ${#NAMES[@]} -gt 0 ] || die "usage: ./pack remove NAME... [--PART]"; check_parts "${NAMES[@]}"; for n in "${NAMES[@]}"; do cmd_remove "$n"; done ;;
   *) usage >&2; die "unknown command: $CMD" ;;
 esac

@@ -17,7 +17,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Syntax check
         run: |
-          for f in install.sh pack bootstrap.sh lib/menu.sh tests/smoke.sh; do bash -n "$f"; done
+          for f in install.sh pack bootstrap.sh lib/menu.sh lib/state.sh lib/source.sh tests/smoke.sh; do bash -n "$f"; done
       - name: Smoke tests
         run: bash tests/smoke.sh
       - name: Menu tests through a pty (Linux only)
